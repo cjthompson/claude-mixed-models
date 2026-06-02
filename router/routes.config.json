@@ -1,0 +1,12 @@
+{
+  "upstreams": {
+    "anthropic": { "baseUrlEnv": "ANTHROPIC_BASE_URL_UPSTREAM", "defaultBaseUrl": "https://api.anthropic.com", "keyEnv": "ANTHROPIC_API_KEY", "auth": "x-api-key" },
+    "minimax": { "baseUrlEnv": "MINIMAX_BASE_URL", "defaultBaseUrl": "https://api.minimax.io/anthropic", "keyEnv": "MINIMAX_API_KEY", "auth": "bearer" }
+  },
+  "routes": {
+    "claude-opus-4-8": { "upstream": "anthropic", "realModel": "claude-opus-4-8" },
+    "claude-sonnet-4-6": { "upstream": "anthropic", "realModel": "claude-sonnet-4-6" },
+    "claude-haiku-4-5": { "upstream": "anthropic", "realModel": "claude-haiku-4-5-20251001" },
+    "claude-minimax-m2": { "upstream": "minimax", "realModel": "MiniMax-M2.5" }
+  }
+}
