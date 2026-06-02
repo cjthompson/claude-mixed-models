@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
-import { hasCacheControl, extractUsageFromSse } from './inspect.js';
+import { extractUsageFromSse } from './inspect.js';
+import { newRequestId, logReq, logRes } from '../lib/log.js';
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
 const UPSTREAM = new URL(process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/anthropic');
@@ -17,18 +18,26 @@ const server = http.createServer((req, res) => {
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
     const raw = Buffer.concat(chunks);
+    const id = newRequestId();
+    const t0 = Date.now();
 
+    // Try to parse the body for REQ-line fields. Failures degrade gracefully —
+    // we still log a REQ line with method/url only.
+    let parsed = null;
     if (raw.length) {
       try {
-        const body = JSON.parse(raw.toString('utf8'));
-        console.log(
-          `\n[REQ] ${req.method} ${req.url} model=${body.model} ` +
-          `cache_control_present=${hasCacheControl(body)}`
-        );
+        parsed = JSON.parse(raw.toString('utf8'));
       } catch {
-        console.log(`\n[REQ] ${req.method} ${req.url} (non-JSON body, ${raw.length}B)`);
+        // Body wasn't JSON. Leave parsed=null and skip model/user fields.
       }
     }
+    logReq(id, {
+      method: req.method,
+      url: req.url,
+      model: parsed?.model,
+      upstream: UPSTREAM.host,
+      user: parsed?.metadata?.user_id,
+    });
 
     const upstreamPath = UPSTREAM.pathname.replace(/\/$/, '') + req.url;
     const headers = { ...req.headers };
@@ -60,16 +69,12 @@ const server = http.createServer((req, res) => {
           const text = Buffer.concat(respChunks).toString('utf8');
           const usage = extractUsageFromSse(text) ??
             (() => { try { return JSON.parse(text).usage ?? null; } catch { return null; } })();
-          if (usage) {
-            console.log(
-              `[RES] status=${upstreamRes.statusCode} ` +
-              `cache_write=${usage.cache_creation_input_tokens ?? 'n/a'} ` +
-              `cache_read=${usage.cache_read_input_tokens ?? 'n/a'} ` +
-              `input=${usage.input_tokens ?? 'n/a'}`
-            );
-          } else {
-            console.log(`[RES] status=${upstreamRes.statusCode} (no usage found)`);
-          }
+          logRes(id, {
+            upstream: UPSTREAM.host,
+            status: upstreamRes.statusCode ?? 502,
+            durationMs: Date.now() - t0,
+            usage,
+          });
         });
       }
     );
