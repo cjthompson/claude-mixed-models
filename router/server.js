@@ -13,11 +13,19 @@ const DEFAULT_UPSTREAM = process.env.DEFAULT_UPSTREAM ?? 'anthropic';
 
 const HOP_BY_HOP = ['transfer-encoding', 'connection', 'keep-alive', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer'];
 
+// Recognized values for the `auth` field in routes.config.json. Anything else
+// is a config typo and the router refuses to start rather than silently
+// picking the wrong auth scheme at runtime.
+export const KNOWN_AUTH_MODES = new Set(['passthrough', 'bearer', 'x-api-key']);
+
 // Resolve an upstream's connection details. `passthrough` upstreams need no key —
 // the client's own credentials (e.g. your Claude subscription token) are forwarded as-is.
 function upstreamConn(name) {
   const u = config.upstreams[name];
   if (!u) throw new Error(`Unknown upstream '${name}' in config`);
+  if (!KNOWN_AUTH_MODES.has(u.auth)) {
+    throw new Error(`Unknown auth mode '${u.auth}' for upstream '${name}' (expected one of: ${[...KNOWN_AUTH_MODES].join(', ')})`);
+  }
   const baseUrl = process.env[u.baseUrlEnv] || u.defaultBaseUrl;
   let key = null;
   if (u.auth !== 'passthrough') {
@@ -94,7 +102,10 @@ function fail(res, status, message) {
   res.end(JSON.stringify({ error: message }));
 }
 
-const server = http.createServer((req, res) => {
+// Exported for tests; the server below wraps it. The handler reads the
+// request body, makes the routing decision, emits REQ/RES log lines, and
+// forwards to the chosen upstream.
+export function handleRequest(req, res) {
   const chunks = [];
   req.on('error', (e) => console.error('[REQ ERROR]', e.message));
   req.on('data', (c) => chunks.push(c));
@@ -156,7 +167,9 @@ const server = http.createServer((req, res) => {
 
     forward(req, res, conn, outBody, { id, t0 });
   });
-});
+}
+
+const server = http.createServer(handleRequest);
 
 server.listen(PORT, () => {
   console.log(`Router on http://localhost:${PORT}`);
