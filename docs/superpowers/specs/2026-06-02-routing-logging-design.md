@@ -133,11 +133,13 @@ logRes(id, {
   upstream: conn.url.host,
   status: upstreamRes.statusCode,
   durationMs: Date.now() - t0,
-  usage: null,  // router doesn't parse SSE; the proxy does. Router still gets status + duration.
+  usage: null,  // router pipes SSE bytes through without buffering. See "Known gap" below.
 });
 ```
 
-(The router forwards SSE bytes verbatim and doesn't currently inspect them. For the router, RES captures status + duration + upstream, but not token usage — that's the proxy's job, and the proxy is the one that talks to MiniMax today. If the router ever needs token usage for a passthrough that returned a body in memory, this is the hook for it.)
+**Known gap: the router does not capture token usage.** The router pipes the upstream response straight to the client (`upstreamRes.pipe(res)`) and does not buffer it, so it has no `usage` object to log. The proxy *does* buffer and parses SSE/JSON for usage, because the proxy was built as a diagnostic. The router's RES line therefore carries `upstream`, `status`, and `duration` only — no `input=` / `output=` / `cache_*=` fields.
+
+This is acceptable for v1 because: (a) the proxy is the place to observe MiniMax cost today; (b) the router is the place to observe latency and routing decisions; and (c) adding usage capture to the router would require buffering the response, which would change the streaming behavior — that's a real design decision, not a small change. If the router needs to capture usage, it would either buffer in memory (memory cost scales with response size) or accumulate from SSE events on the fly (state, which the spec deliberately avoids). Out of scope for v1.
 
 On upstream error, the error handler logs a RES line with `status: 502` and `usage: null` before writing the 502 to the client. The current `[ROUTER UPSTREAM ERROR]` console.error line is removed — its information is on the RES line.
 
