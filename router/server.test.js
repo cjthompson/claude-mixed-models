@@ -121,10 +121,10 @@ test('forward: https:// upstream reaches the error handler (regression: ERR_INVA
 
 // --- handleRequest — REQ line ----------------------------------------------
 // These tests capture console.log to assert the REQ line emitted for each
-// routing path. The actual upstream is never contacted: we point
-// handleRequest's downstream at a closed port by intercepting the call
-// just after the REQ line is logged. To do that we monkey-patch forward
-// for the duration of each test.
+// routing path. The actual upstream is never contacted: handleRequest emits
+// the REQ line before calling forward(), so the closed-port error from
+// forward() (if any) doesn't affect the assertion. The tests don't assert
+// on the RES line.
 
 function captureLog() {
   const captured = [];
