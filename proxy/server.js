@@ -47,7 +47,9 @@ const server = http.createServer((req, res) => {
         headers,
       },
       (upstreamRes) => {
-        res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        const safeHeaders = { ...upstreamRes.headers };
+        for (const h of ['transfer-encoding', 'connection', 'keep-alive', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer']) delete safeHeaders[h];
+        res.writeHead(upstreamRes.statusCode ?? 502, safeHeaders);
         const respChunks = [];
         upstreamRes.on('data', (c) => {
           respChunks.push(c);
