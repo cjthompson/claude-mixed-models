@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "proxy": "node proxy/server.js",
-    "router": "node router/server.js"
+    "proxy": "node --env-file-if-exists=.env proxy/server.js",
+    "router": "node --env-file-if-exists=.env router/server.js"
   }
 }
