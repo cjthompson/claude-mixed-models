@@ -22,12 +22,16 @@ No parser, no log shipper, no JSON — plain key=value lines that are greppable 
 
 ## Log shape
 
-Two lines per request, both prefixed with a request id:
+Two lines per request, both prefixed with a `HH:MM:SS` timestamp and a request id:
 
 ```
-[REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=chris
-[RES 4f7a9b2c] upstream=minimax status=200 duration=842ms input=1234 output=42 cache_read=5678 cache_write=120
+[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=chris
+[01:23:46 RES 4f7a9b2c] upstream=minimax status=200 duration=842ms input=1234 output=42 cache_read=5678 cache_write=120
 ```
+
+### Timestamp
+
+`HH:MM:SS` in 24-hour local time, captured at the moment the line is emitted. Two digits each, zero-padded. The timestamp comes first, before the line tag, so a `tail -f` shows readable wall-clock time. The resolution is intentionally coarse — sub-second timing is captured in the `duration` field, not in the timestamp.
 
 ### Request id
 
@@ -75,14 +79,17 @@ Exports:
 // 8 lowercase hex chars. e.g. '4f7a9b2c'.
 export function newRequestId(): string
 
+// Returns the current local time as 'HH:MM:SS' (24h, zero-padded). e.g. '01:23:45'.
+export function timestamp(): string
+
 // fields: { method, url, model?, route?, upstream, user? }
 // Emits a single line via console.log:
-//   [REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax ...
+//   [01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax ...
 export function logReq(id: string, fields: object): void
 
 // fields: { upstream, status, durationMs: number, usage?: object | null }
 // Emits a single line via console.log:
-//   [RES 4f7a9b2c] upstream=minimax status=200 duration=842ms input=1234 ...
+//   [01:23:46 RES 4f7a9b2c] upstream=minimax status=200 duration=842ms ...
 export function logRes(id: string, fields: object): void
 ```
 
@@ -94,6 +101,8 @@ Internal:
 // with present fields only, in that fixed order. Returns '' for null.
 function formatUsage(usage: object | null): string
 ```
+
+The `timestamp` export exists so tests can stub it (to assert an exact line) and so a future caller that wants to log a one-off timestamped line can do so without re-deriving the format. Production `logReq` and `logRes` call it once per emission and prepend the result to the line. `timestamp` reads `new Date()` at call time — no shared state, no caching of the value across calls.
 
 `newRequestId` calls `crypto.randomBytes(4)` and is a pure function (no shared state). `logReq` and `logRes` build a single string and call `console.log` exactly once — no buffering, no state.
 
@@ -174,15 +183,16 @@ The proxy's existing `cache_control_present=…` REQ field is preserved — that
 
 `lib/log.test.js` covers:
 1. `newRequestId` returns 8 hex chars, and two calls return different ids.
-2. `logReq` emits fields in the documented order, and omits fields whose value is `undefined` / `null`.
-3. `logRes` does the same for its field set.
-4. `formatUsage(null)` returns `''`. `formatUsage({ input_tokens: 1, output_tokens: 2 })` returns ` input=1 output=2`. Field order is fixed.
+2. `timestamp` returns a string matching `/^\d{2}:\d{2}:\d{2}$/`.
+3. `logReq` emits fields in the documented order, and omits fields whose value is `undefined` / `null`. The line is prefixed with `[<timestamp> REQ <id>]`. Tests stub `timestamp` so the assertion is exact.
+4. `logRes` does the same for its field set.
+5. `formatUsage(null)` returns `''`. `formatUsage({ input_tokens: 1, output_tokens: 2 })` returns ` input=1 output=2`. Field order is fixed.
 
 `router/server.test.js` adds:
-5. Mapped route: `logReq` is called with the routed real model, `logRes` with status and duration.
-6. Unmapped passthrough: `logReq` is called with no `route` field, `upstream` set to the default upstream's host.
-7. Bodyless (e.g. `GET /v1/models`): `logReq` is called with no `model` / `route`, `upstream` set to the default.
-8. The existing `forward` test adapts to the new `{ id, t0 }` parameter; the assertions on 502 + "upstream error" body still hold.
+6. Mapped route: `logReq` is called with the routed real model, `logRes` with status and duration.
+7. Unmapped passthrough: `logReq` is called with no `route` field, `upstream` set to the default upstream's host.
+8. Bodyless (e.g. `GET /v1/models`): `logReq` is called with no `model` / `route`, `upstream` set to the default.
+9. The existing `forward` test adapts to the new `{ id, t0 }` parameter; the assertions on 502 + "upstream error" body still hold.
 
 `proxy/inspect.test.js` updates the SSE-usage test (if one exists) to assert the **last** usage object wins, and adds a test where `message_delta` carries `output_tokens` and the function returns it.
 
@@ -191,8 +201,8 @@ The proxy's existing `cache_control_present=…` REQ field is preserved — that
 After implementation, `tail -f` the router or proxy and look for a single id across two lines:
 
 ```
-[REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=chris
-[RES 4f7a9b2c] upstream=minimax status=200 duration=842ms input=1234 output=42 cache_read=5678 cache_write=120
+[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=chris
+[01:23:46 RES 4f7a9b2c] upstream=minimax status=200 duration=842ms input=1234 output=42 cache_read=5678 cache_write=120
 ```
 
 `grep 4f7a9b2c` gives the whole transaction. `grep upstream=minimax` filters by provider. `grep status=502` surfaces failed calls. The combination of `route=`, `upstream=`, and the `cache_*` fields on RES answers cost and routing questions in one line each.
