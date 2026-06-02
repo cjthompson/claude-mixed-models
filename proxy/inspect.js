@@ -18,8 +18,11 @@ export function hasCacheControl(body) {
 }
 
 // Anthropic streams the prompt-side usage (including cache_*_input_tokens) in the
-// message_start event. Scan SSE text for the first such usage object.
+// message_start event and output_tokens + total_tokens in message_delta. Scan
+// SSE text and return the last usage object seen so the caller gets a complete
+// record from a single call.
 export function extractUsageFromSse(sseText) {
+  let lastUsage = null;
   for (const line of sseText.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed.startsWith('data:')) continue;
@@ -32,7 +35,7 @@ export function extractUsageFromSse(sseText) {
       continue;
     }
     const usage = obj?.message?.usage ?? obj?.usage;
-    if (usage && typeof usage === 'object') return usage;
+    if (usage && typeof usage === 'object') lastUsage = usage;
   }
-  return null;
+  return lastUsage;
 }
