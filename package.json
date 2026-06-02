@@ -1,0 +1,11 @@
+{
+  "name": "claude-mixed-models",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "proxy": "node proxy/server.js",
+    "router": "node router/server.js"
+  }
+}
