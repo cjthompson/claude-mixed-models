@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { resolveRoute } from './routes.js';
+import { newRequestId, logReq, logRes } from '../lib/log.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(readFileSync(join(here, 'routes.config.json'), 'utf8'));
@@ -78,10 +79,12 @@ const server = http.createServer((req, res) => {
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
     const raw = Buffer.concat(chunks);
+    const id = newRequestId();
+    const t0 = Date.now();
 
     // Only POSTs with a JSON body carry a model to route on. Everything else
     // (GET /v1/models on startup, bodyless calls) rides the default upstream untouched.
-    let conn, outBody, label;
+    let conn, outBody, route, parsedBody;
     if (req.method === 'POST' && raw.length) {
       let body;
       try {
@@ -89,7 +92,11 @@ const server = http.createServer((req, res) => {
       } catch {
         return fail(res, 400, 'router: body is not JSON');
       }
-      const route = resolveRoute(body.model, config.routes);
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        return fail(res, 400, 'router: body must be a JSON object');
+      }
+      parsedBody = body;
+      route = resolveRoute(body.model, config.routes);
       if (route) {
         try {
           conn = upstreamConn(route.upstream);
@@ -98,7 +105,6 @@ const server = http.createServer((req, res) => {
         }
         body.model = route.realModel;
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
-        label = `${body.model} via ${route.upstream}`;
       } else {
         // Unmapped model → ride the default upstream untouched. For a Claude
         // subscription this forwards your own credential straight to Anthropic.
@@ -108,7 +114,6 @@ const server = http.createServer((req, res) => {
           return fail(res, 500, `router: ${err.message}`);
         }
         outBody = raw;
-        label = `${body.model} → default ${DEFAULT_UPSTREAM} (passthrough)`;
       }
     } else {
       try {
@@ -117,11 +122,18 @@ const server = http.createServer((req, res) => {
         return fail(res, 500, `router: ${err.message}`);
       }
       outBody = raw;
-      label = `${req.method} ${req.url} → default ${DEFAULT_UPSTREAM} (passthrough)`;
     }
 
-    console.log(`[ROUTER] ${label}`);
-    forward(req, res, conn, outBody);
+    logReq(id, {
+      method: req.method,
+      url: req.url,
+      model: parsedBody?.model,
+      route: route?.realModel,
+      upstream: conn.url.host,
+      user: parsedBody?.metadata?.user_id,
+    });
+
+    forward(req, res, conn, outBody, { id, t0 });
   });
 });
 
