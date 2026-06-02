@@ -1,7 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { extractUsageFromSse } from './inspect.js';
-import { newRequestId, logReq, logRes } from '../lib/log.js';
+import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
 const UPSTREAM = new URL(process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/anthropic');
@@ -37,6 +37,7 @@ const server = http.createServer((req, res) => {
       model: parsed?.model,
       upstream: UPSTREAM.host,
       user: parsed?.metadata?.user_id,
+      session: sessionIdFromUserId(parsed?.metadata?.user_id),
     });
 
     const upstreamPath = UPSTREAM.pathname.replace(/\/$/, '') + req.url;
@@ -74,6 +75,7 @@ const server = http.createServer((req, res) => {
             status: upstreamRes.statusCode ?? 502,
             durationMs: Date.now() - t0,
             usage,
+            session: sessionIdFromUserId(parsed?.metadata?.user_id),
           });
         });
       }

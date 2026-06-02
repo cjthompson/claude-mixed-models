@@ -1,10 +1,11 @@
 import http from 'node:http';
 import https from 'node:https';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { resolveRoute } from './routes.js';
-import { newRequestId, logReq, logRes } from '../lib/log.js';
+import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(readFileSync(join(here, 'routes.config.json'), 'utf8'));
@@ -44,7 +45,7 @@ export function applyAuth(headers, conn) {
   else headers['x-api-key'] = conn.key;
 }
 
-export function forward(req, res, conn, outBody, { id, t0 }) {
+export function forward(req, res, conn, outBody, { id, t0, session }) {
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
   headers.host = conn.url.host;
@@ -77,6 +78,7 @@ export function forward(req, res, conn, outBody, { id, t0 }) {
           status: upstreamRes.statusCode ?? 502,
           durationMs: Date.now() - t0,
           usage: null,
+          session,
         });
       });
     }
@@ -91,6 +93,7 @@ export function forward(req, res, conn, outBody, { id, t0 }) {
       status: 502,
       durationMs: Date.now() - t0,
       usage: null,
+      session,
     });
   });
   upstreamReq.write(outBody);
@@ -156,6 +159,7 @@ export function handleRequest(req, res) {
       outBody = raw;
     }
 
+    const session = sessionIdFromUserId(parsedBody?.metadata?.user_id);
     logReq(id, {
       method: req.method,
       url: req.url,
@@ -163,9 +167,10 @@ export function handleRequest(req, res) {
       route: route?.realModel,
       upstream: conn.url.host,
       user: parsedBody?.metadata?.user_id,
+      session,
     });
 
-    forward(req, res, conn, outBody, { id, t0 });
+    forward(req, res, conn, outBody, { id, t0, session });
   });
 }
 
@@ -175,6 +180,16 @@ server.listen(PORT, () => {
   console.log(`Router on http://localhost:${PORT}`);
   console.log(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
   console.log(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);
+  // Yellow banner confirms colorized log code is loaded. If you don't see
+  // this in yellow, you're running the wrong code (or a version without
+  // color support).
+  let headSha = 'unknown';
+  try {
+    headSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: here, encoding: 'utf8' }).trim();
+  } catch {
+    // Not running from a git checkout; the banner is best-effort.
+  }
+  console.log(`\x1b[33m[router] log color enabled (commit HEAD = ${headSha})\x1b[0m`);
 });
 
 process.on('SIGTERM', () => {
