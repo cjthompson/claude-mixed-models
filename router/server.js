@@ -36,7 +36,7 @@ function upstreamConn(name) {
 }
 
 // passthrough: leave the client's credentials intact. bearer/x-api-key: replace them.
-function applyAuth(headers, conn) {
+export function applyAuth(headers, conn) {
   if (conn.auth === 'passthrough') return;
   delete headers['x-api-key'];
   delete headers.authorization;

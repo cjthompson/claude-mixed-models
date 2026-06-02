@@ -1,8 +1,23 @@
-import { test } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
-import { applyAuth, forward, handleRequest, KNOWN_AUTH_MODES } from './server.js';
+
+// Importing server.js has the side effect of binding ROUTER_PORT (default
+// 8788) via the createServer() at the bottom of the module. ESM imports
+// are hoisted, so we can't set process.env before they evaluate — the
+// env must be in place *before* the import statement runs. The clean way
+// to do that is a dynamic import inside a before() hook. The other env
+// vars the tests need (MINIMAX_API_KEY placeholder so upstreamConn()
+// doesn't throw, ROUTER_PORT=0 so listen() picks an ephemeral port) are
+// set here too.
+process.env.MINIMAX_API_KEY ||= 'test-key-not-used';
+process.env.ROUTER_PORT ||= '0';
+
+let applyAuth, forward, handleRequest, KNOWN_AUTH_MODES;
+before(async () => {
+  ({ applyAuth, forward, handleRequest, KNOWN_AUTH_MODES } = await import('./server.js'));
+});
 
 // --- applyAuth -------------------------------------------------------------
 
