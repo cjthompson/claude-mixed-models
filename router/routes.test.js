@@ -6,6 +6,7 @@ const table = {
   'claude-opus-4-8': { upstream: 'anthropic', realModel: 'claude-opus-4-8' },
   'claude-sonnet-4-6': { upstream: 'anthropic', realModel: 'claude-sonnet-4-6' },
   'claude-minimax-m2': { upstream: 'minimax', realModel: 'MiniMax-M2.5' },
+  'claude-haiku-4-5': { upstream: 'anthropic', realModel: 'claude-haiku-4-5-20251001' },
 };
 
 test('resolveRoute: maps an Anthropic model to the anthropic upstream unchanged', () => {
@@ -22,4 +23,10 @@ test('resolveRoute: maps a claude-prefixed alias to the minimax upstream with re
 
 test('resolveRoute: returns null for an unknown model', () => {
   assert.equal(resolveRoute('gpt-9', table), null);
+});
+
+test('resolveRoute: rewrites a haiku alias to its dated real model id', () => {
+  assert.deepEqual(resolveRoute('claude-haiku-4-5', table), {
+    upstream: 'anthropic', realModel: 'claude-haiku-4-5-20251001',
+  });
 });
