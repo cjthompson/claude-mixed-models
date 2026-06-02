@@ -1,7 +1,7 @@
 ---
 name: bulk-coder
 description: Use for high-volume, low-judgment code generation — scaffolding, boilerplate, repetitive edits across many files, first-draft implementations from a precise spec. Not for architecture, security-sensitive code, or final review.
-model: claude-minimax-m2
+model: claude-minimax
 tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 

@@ -5,7 +5,7 @@ import { resolveRoute } from './routes.js';
 const table = {
   'claude-opus-4-8': { upstream: 'anthropic', realModel: 'claude-opus-4-8' },
   'claude-sonnet-4-6': { upstream: 'anthropic', realModel: 'claude-sonnet-4-6' },
-  'claude-minimax-m2': { upstream: 'minimax', realModel: 'MiniMax-M2.5' },
+  'claude-minimax': { upstream: 'minimax', realModel: 'MiniMax-M3' },
   'claude-haiku-4-5': { upstream: 'anthropic', realModel: 'claude-haiku-4-5-20251001' },
 };
 
@@ -16,8 +16,8 @@ test('resolveRoute: maps an Anthropic model to the anthropic upstream unchanged'
 });
 
 test('resolveRoute: maps a claude-prefixed alias to the minimax upstream with rewritten model', () => {
-  assert.deepEqual(resolveRoute('claude-minimax-m2', table), {
-    upstream: 'minimax', realModel: 'MiniMax-M2.5',
+  assert.deepEqual(resolveRoute('claude-minimax', table), {
+    upstream: 'minimax', realModel: 'MiniMax-M3',
   });
 });
 
