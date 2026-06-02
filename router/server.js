@@ -36,13 +36,17 @@ function applyAuth(headers, conn) {
   else headers['x-api-key'] = conn.key;
 }
 
-function forward(req, res, conn, outBody) {
+export function forward(req, res, conn, outBody, { id, t0 }) {
   const headers = { ...req.headers };
+  for (const h of HOP_BY_HOP) delete headers[h];
   headers.host = conn.url.host;
   headers['content-length'] = String(outBody.length);
   applyAuth(headers, conn);
 
   const upstreamPath = conn.url.pathname.replace(/\/$/, '') + req.url;
+  // https.request() accepts the `protocol` option and handles both http:// and
+  // https:// upstreams; http.request() rejects 'https:' outright. Use the same
+  // request module for both protocols.
   const upstreamReq = https.request(
     {
       protocol: conn.url.protocol,
@@ -57,12 +61,29 @@ function forward(req, res, conn, outBody) {
       for (const h of HOP_BY_HOP) delete safeHeaders[h];
       res.writeHead(upstreamRes.statusCode ?? 502, safeHeaders);
       upstreamRes.pipe(res);
+      // Log the RES line on response end. usage is null because the router
+      // pipes SSE bytes through without buffering (see spec "Known gap").
+      upstreamRes.on('end', () => {
+        logRes(id, {
+          upstream: conn.url.host,
+          status: upstreamRes.statusCode ?? 502,
+          durationMs: Date.now() - t0,
+          usage: null,
+        });
+      });
     }
   );
   upstreamReq.on('error', (err) => {
     console.error('[ROUTER UPSTREAM ERROR]', err.message);
     if (!res.headersSent) res.writeHead(502);
     res.end('upstream error');
+    // Emit a RES line for the failed request so it shows up in logs.
+    logRes(id, {
+      upstream: conn.url.host,
+      status: 502,
+      durationMs: Date.now() - t0,
+      usage: null,
+    });
   });
   upstreamReq.write(outBody);
   upstreamReq.end();
