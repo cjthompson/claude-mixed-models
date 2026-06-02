@@ -13,6 +13,7 @@ if (!KEY) {
 
 const server = http.createServer((req, res) => {
   const chunks = [];
+  req.on('error', (e) => console.error('[REQ ERROR]', e.message));
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
     const raw = Buffer.concat(chunks);
@@ -34,7 +35,7 @@ const server = http.createServer((req, res) => {
     headers.host = UPSTREAM.host;
     headers['x-api-key'] = KEY;
     headers.authorization = `Bearer ${KEY}`;
-    delete headers['content-length'];
+    headers['content-length'] = String(raw.length);
 
     const upstreamReq = https.request(
       {
