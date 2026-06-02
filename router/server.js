@@ -176,3 +176,7 @@ server.listen(PORT, () => {
   console.log(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
   console.log(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);
 });
+
+process.on('SIGTERM', () => {
+  server.close(() => process.exit(0));
+});

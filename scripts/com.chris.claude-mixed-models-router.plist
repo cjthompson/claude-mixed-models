@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.chris.claude-mixed-models-router</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%%NODE_PATH%%</string>
+		<string>--env-file-if-exists=.env</string>
+		<string>%%PROJECT_DIR%%/router/server.js</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>%%PROJECT_DIR%%</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%%PROJECT_DIR%%/router.log</string>
+	<key>StandardErrorPath</key>
+	<string>%%PROJECT_DIR%%/router.err.log</string>
+</dict>
+</plist>

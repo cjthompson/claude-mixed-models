@@ -11,4 +11,7 @@ Run Claude Code with both Anthropic and MiniMax models via a tiny local router.
 2. Phase 0: `npm run proxy` then in another shell `scripts/run-diagnostic.sh`. Read `proxy/server.js` log output.
 3. Phase 1+: `npm run router` then `scripts/run-router.sh`.
 
+## Running as a service
+To run the router as a persistent background service (auto-restart on crash, auto-start on login), see [`docs/operations/router-as-service.md`](docs/operations/router-as-service.md).
+
 See `docs/superpowers/plans/` for the full plan.
