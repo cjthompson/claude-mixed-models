@@ -17,13 +17,13 @@ By default, `npm run router` starts the router for the current session only. If 
 
    This will:
    - Detect your project directory and node binary
-   - Create `~/Library/LaunchAgents/com.chris.claude-mixed-models-router.plist`
+   - Create `~/Library/LaunchAgents/com.claude-mixed-models.router.plist`
    - Load the service into launchd
    - Print status and log-viewing commands
 
 3. Verify the service is running:
    ```bash
-   launchctl print gui/$(id -u)/com.chris.claude-mixed-models-router
+   launchctl print gui/$(id -u)/com.claude-mixed-models.router
    ```
 
 ## Usage
@@ -48,13 +48,13 @@ tail -f <project>/router.err.log
 ### Stop the Service
 
 ```bash
-launchctl stop gui/$(id -u)/com.chris.claude-mixed-models-router
+launchctl stop gui/$(id -u)/com.claude-mixed-models.router
 ```
 
 ### Start the Service
 
 ```bash
-launchctl start gui/$(id -u)/com.chris.claude-mixed-models-router
+launchctl start gui/$(id -u)/com.claude-mixed-models.router
 ```
 
 ### Uninstall
@@ -69,7 +69,7 @@ This will unload the service and remove the plist file from `~/Library/LaunchAge
 
 The installation creates a **launchd user agent** — a macOS system feature for running per-user background services. The plist file contains:
 
-- **Label**: `com.chris.claude-mixed-models-router` (unique identifier)
+- **Label**: `com.claude-mixed-models.router` (unique identifier)
 - **ProgramArguments**: The exact node command from `npm run router` (node with `--env-file-if-exists=.env`)
 - **WorkingDirectory**: Your project root (so relative `.env` loading works)
 - **KeepAlive**: `true` (automatically restart on crash)

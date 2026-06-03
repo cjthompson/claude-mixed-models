@@ -25,7 +25,7 @@ No parser, no log shipper, no JSON — plain key=value lines that are greppable 
 Two lines per request, both prefixed with a `HH:MM:SS` timestamp and a request id:
 
 ```
-[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=chris
+[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=alice
 [01:23:46 RES 4f7a9b2c] upstream=minimax status=200 duration=842ms input=1234 output=42 cache_read=5678 cache_write=120
 ```
 
@@ -201,7 +201,7 @@ The proxy's existing `cache_control_present=…` REQ field is preserved — that
 After implementation, `tail -f` the router or proxy and look for a single id across two lines:
 
 ```
-[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=chris
+[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=alice
 [01:23:46 RES 4f7a9b2c] upstream=minimax status=200 duration=842ms input=1234 output=42 cache_read=5678 cache_write=120
 ```
 

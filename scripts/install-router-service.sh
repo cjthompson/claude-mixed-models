@@ -13,8 +13,8 @@ if [ -z "$NODE_PATH" ]; then
 fi
 
 # Path to the plist template and destination
-PLIST_TEMPLATE="$SCRIPT_DIR/com.chris.claude-mixed-models-router.plist"
-PLIST_DEST="$HOME/Library/LaunchAgents/com.chris.claude-mixed-models-router.plist"
+PLIST_TEMPLATE="$SCRIPT_DIR/com.claude-mixed-models.router.plist"
+PLIST_DEST="$HOME/Library/LaunchAgents/com.claude-mixed-models.router.plist"
 
 # Create LaunchAgents directory if it doesn't exist
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -41,17 +41,17 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST"
 echo "Router service installed and started."
 echo ""
 echo "To check status, run:"
-echo "  launchctl print gui/\$(id -u)/com.chris.claude-mixed-models-router"
+echo "  launchctl print gui/\$(id -u)/com.claude-mixed-models.router"
 echo ""
 echo "To view logs:"
 echo "  tail -f $PROJECT_DIR/router.log"
 echo "  tail -f $PROJECT_DIR/router.err.log"
 echo ""
 echo "To stop the service:"
-echo "  launchctl stop gui/\$(id -u)/com.chris.claude-mixed-models-router"
+echo "  launchctl stop gui/\$(id -u)/com.claude-mixed-models.router"
 echo ""
 echo "To start the service:"
-echo "  launchctl start gui/\$(id -u)/com.chris.claude-mixed-models-router"
+echo "  launchctl start gui/\$(id -u)/com.claude-mixed-models.router"
 echo ""
 echo "To uninstall:"
 echo "  scripts/install-router-service.sh uninstall"

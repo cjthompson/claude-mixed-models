@@ -151,7 +151,7 @@ test('logReq: emits fields in the documented order, omitting absent ones', () =>
       model: 'claude-minimax',
       route: 'MiniMax-M3',
       upstream: 'minimax',
-      user: 'chris',
+      user: 'alice',
     });
     logReq('aaaaaaaaaaaaaaaa', {
       method: 'GET',
@@ -164,7 +164,7 @@ test('logReq: emits fields in the documented order, omitting absent ones', () =>
   }
 
   assert.deepEqual(captured, [
-    '[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=chris',
+    '[01:23:45 REQ 4f7a9b2c] method=POST url=/v1/messages model=claude-minimax route=MiniMax-M3 upstream=minimax user=alice',
     '[01:23:45 REQ aaaaaaaaaaaaaaaa] method=GET url=/v1/models upstream=api.anthropic.com',
   ]);
 });

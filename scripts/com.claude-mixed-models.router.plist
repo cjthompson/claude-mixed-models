@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.chris.claude-mixed-models-router</string>
+	<string>com.claude-mixed-models.router</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>%%NODE_PATH%%</string>

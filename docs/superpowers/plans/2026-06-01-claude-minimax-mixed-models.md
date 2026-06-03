@@ -126,7 +126,7 @@ See `docs/superpowers/plans/` for the full plan.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/chris/dev/personal/claude-mixed-models
+cd "$HOME/dev/personal/claude-mixed-models"
 git add package.json .gitignore .env.example README.md docs/
 git commit -m "chore: scaffold claude-mixed-models project"
 ```
