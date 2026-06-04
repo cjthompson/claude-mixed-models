@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { resolveRoute } from './routes.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
+import { extractUsageFromSse } from '../lib/sse.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(readFileSync(join(here, 'routes.config.json'), 'utf8'));
@@ -81,6 +82,14 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
   // https.request() accepts the `protocol` option and handles both http:// and
   // https:// upstreams; http.request() rejects 'https:' outright. Use the same
   // request module for both protocols.
+  // `done` is shared by every exit path (upstream end, upstream error, client
+  // close). Exactly one of them may call logRes + res.end for a given request.
+  let done = false;
+  const finalize = (fields) => {
+    if (done) return;
+    done = true;
+    logRes(id, fields);
+  };
   const upstreamReq = https.request(
     {
       protocol: conn.url.protocol,
@@ -91,29 +100,75 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
       headers,
     },
     (upstreamRes) => {
+      // Track the upstream status so the client-disconnect path can log it.
+      const upstreamStatus = upstreamRes.statusCode ?? 502;
       const safeHeaders = { ...upstreamRes.headers };
       for (const h of HOP_BY_HOP) delete safeHeaders[h];
-      res.writeHead(upstreamRes.statusCode ?? 502, safeHeaders);
-      upstreamRes.pipe(res);
-      // Log the RES line on response end. usage is null because the router
-      // pipes SSE bytes through without buffering (see spec "Known gap").
+      // For non-200 responses write the status immediately. For 200 responses
+      // we defer writeHead to the first data chunk so an empty body (HTTP 200
+      // with no bytes) can be detected and converted to 502 before any bytes
+      // reach the client. All paths below guard on res.headersSent.
+      if (upstreamStatus !== 200) {
+        res.writeHead(upstreamStatus, safeHeaders);
+      }
+      // Buffer chunks so we can scan the SSE stream for the final `usage`
+      // block on end, while still writing each chunk to the client
+      // immediately.
+      const respChunks = [];
+      upstreamRes.on('data', (c) => {
+        respChunks.push(c);
+        if (!res.headersSent) res.writeHead(upstreamStatus, safeHeaders);
+        if (!res.writableEnded) res.write(c);
+      });
       upstreamRes.on('end', () => {
-        logRes(id, {
+        if (upstreamStatus === 200 && respChunks.length === 0) {
+          console.error(`[UPSTREAM EMPTY RESPONSE] upstream=${conn.url.host} sent HTTP 200 with empty body`);
+          if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
+          if (!res.writableEnded) res.end(JSON.stringify({ error: 'upstream returned empty response (HTTP 200)' }));
+          finalize({
+            upstream: conn.url.host,
+            status: 502,
+            durationMs: Date.now() - t0,
+            usage: null,
+            session,
+          });
+          return;
+        }
+        if (!res.headersSent) res.writeHead(upstreamStatus, safeHeaders);
+        if (!res.writableEnded) res.end();
+        // SSE is the common case; fall back to JSON for non-streaming
+        // responses (e.g. a 400 from the upstream returned as application/json).
+        const text = Buffer.concat(respChunks).toString('utf8');
+        const usage = extractUsageFromSse(text) ?? parseJsonUsage(text);
+        finalize({
           upstream: conn.url.host,
-          status: upstreamRes.statusCode ?? 502,
+          status: upstreamStatus,
           durationMs: Date.now() - t0,
-          usage: null,
+          usage,
           session,
         });
       });
     }
   );
+  // If the client goes away mid-stream, kill the upstream so we don't keep
+  // paying for a response nobody is reading, and log a RES line for it.
+  res.on('close', () => {
+    if (done) return;
+    upstreamReq.destroy();
+    finalize({
+      upstream: conn.url.host,
+      status: 499,    // nginx convention for "client closed request"
+      durationMs: Date.now() - t0,
+      usage: null,
+      session,
+    });
+  });
   upstreamReq.on('error', (err) => {
     console.error('[ROUTER UPSTREAM ERROR]', err.message);
     if (!res.headersSent) res.writeHead(502);
-    res.end('upstream error');
+    if (!res.writableEnded) res.end('upstream error');
     // Emit a RES line for the failed request so it shows up in logs.
-    logRes(id, {
+    finalize({
       upstream: conn.url.host,
       status: 502,
       durationMs: Date.now() - t0,
@@ -123,6 +178,19 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
   });
   upstreamReq.write(outBody);
   upstreamReq.end();
+}
+
+// Fallback for non-SSE responses. Returns null on any parse failure or when
+// the parsed body has no .usage field.
+function parseJsonUsage(text) {
+  if (!text) return null;
+  try {
+    const obj = JSON.parse(text);
+    const usage = obj?.usage;
+    return usage && typeof usage === 'object' ? usage : null;
+  } catch {
+    return null;
+  }
 }
 
 function fail(res, status, message) {
@@ -198,6 +266,56 @@ export function handleRequest(req, res) {
 
 const server = http.createServer(handleRequest);
 
+// Wire graceful SIGTERM shutdown. The router stops accepting new
+// connections, lets in-flight streaming responses finish, and only exits
+// once every tracked client socket has closed. A second SIGTERM during
+// the drain destroys the remaining sockets and exits immediately.
+//
+// Exported for tests. The production bottom-of-module call passes the
+// real `process.exit`; tests inject a stub so they don't kill the runner.
+export function installShutdown(srv, { exit = process.exit } = {}) {
+  // Track every client TCP socket the server accepts. Tracking sockets
+  // (not ServerResponses) is intentional: a keep-alive client may be
+  // idle between requests with no active response, but it's still an
+  // open connection we shouldn't drop on its own.
+  const openConnections = new Set();
+  let shuttingDown = false;
+  let exitCode = 0;
+
+  srv.on('connection', (socket) => {
+    openConnections.add(socket);
+    socket.on('close', () => {
+      openConnections.delete(socket);
+      if (shuttingDown) {
+        console.log(`[shutdown] connection closed (${openConnections.size} remaining)`);
+        if (openConnections.size === 0) exit(exitCode);
+      }
+    });
+  });
+
+  const onSigterm = () => {
+    if (shuttingDown) {
+      console.log(`[shutdown] received second SIGTERM, forcing immediate shutdown (${openConnections.size} connection(s) still open)`);
+      for (const s of openConnections) s.destroy();
+      exit(exitCode);
+      return;
+    }
+    shuttingDown = true;
+    console.log(`[shutdown] received SIGTERM, beginning graceful shutdown (${openConnections.size} open connection(s))`);
+    srv.close((err) => {
+      if (err) {
+        exitCode = 1;
+        console.error('[shutdown] server.close error:', err.message);
+      }
+      if (openConnections.size === 0) exit(exitCode);
+    });
+  };
+
+  process.on('SIGTERM', onSigterm);
+
+  return { openConnections, get shuttingDown() { return shuttingDown; }, onSigterm };
+}
+
 server.listen(PORT, () => {
   console.log(`Router on http://localhost:${PORT}`);
   console.log(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
@@ -214,6 +332,4 @@ server.listen(PORT, () => {
   console.log(`\x1b[33m[router] log color enabled (commit HEAD = ${headSha})\x1b[0m`);
 });
 
-process.on('SIGTERM', () => {
-  server.close(() => process.exit(0));
-});
+installShutdown(server);

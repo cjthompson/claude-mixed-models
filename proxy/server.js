@@ -1,6 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import { extractUsageFromSse, hasCacheControl } from './inspect.js';
+import { extractUsageFromSse, hasCacheControl } from '../lib/sse.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
@@ -60,22 +60,41 @@ const server = http.createServer((req, res) => {
         headers,
       },
       (upstreamRes) => {
+        const upstreamStatus = upstreamRes.statusCode ?? 502;
         const safeHeaders = { ...upstreamRes.headers };
         for (const h of ['transfer-encoding', 'connection', 'keep-alive', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer']) delete safeHeaders[h];
-        res.writeHead(upstreamRes.statusCode ?? 502, safeHeaders);
+        // Delay writeHead for 200 so an empty body can be detected and replaced with 502.
+        if (upstreamStatus !== 200) {
+          res.writeHead(upstreamStatus, safeHeaders);
+        }
         const respChunks = [];
         upstreamRes.on('data', (c) => {
           respChunks.push(c);
+          if (!res.headersSent) res.writeHead(upstreamStatus, safeHeaders);
           res.write(c);
         });
         upstreamRes.on('end', () => {
+          if (upstreamStatus === 200 && respChunks.length === 0) {
+            console.error(`[UPSTREAM EMPTY RESPONSE] ${UPSTREAM.host} sent HTTP 200 with empty body`);
+            if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: 'upstream returned empty response (HTTP 200)' }));
+            logRes(id, {
+              upstream: UPSTREAM.host,
+              status: 502,
+              durationMs: Date.now() - t0,
+              usage: null,
+              session: sessionIdFromUserId(parsed?.metadata?.user_id),
+            });
+            return;
+          }
+          if (!res.headersSent) res.writeHead(upstreamStatus, safeHeaders);
           res.end();
           const text = Buffer.concat(respChunks).toString('utf8');
           const usage = extractUsageFromSse(text) ??
             (() => { try { return JSON.parse(text).usage ?? null; } catch { return null; } })();
           logRes(id, {
             upstream: UPSTREAM.host,
-            status: upstreamRes.statusCode ?? 502,
+            status: upstreamStatus,
             durationMs: Date.now() - t0,
             usage,
             session: sessionIdFromUserId(parsed?.metadata?.user_id),
