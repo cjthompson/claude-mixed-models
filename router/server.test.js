@@ -127,11 +127,13 @@ test('forward: https:// upstream reaches the error handler (regression: ERR_INVA
   assert.equal(getStatus(), 502, 'error handler should set 502 on unreachable upstream');
   assert.equal(getBody(), 'upstream error');
   // The error path must still emit a RES line so failed requests show up
-  // in observability logs.
+  // in observability logs. The status value is color-wrapped in red since
+  // status >= 400, so we strip ANSI before matching the literal value.
   const resLine = captured.find((l) => /^\[\d{2}:\d{2}:\d{2} RES test-id-1\]/.test(l));
   assert.ok(resLine, `expected a RES line for the failed request, got: ${JSON.stringify(captured)}`);
-  assert.match(resLine, /status=502/);
-  assert.match(resLine, /upstream=127\.0\.0\.1/);
+  const stripped = resLine.replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(stripped, /status=502/);
+  assert.match(stripped, /upstream=127\.0\.0\.1/);
 });
 
 // --- handleRequest — REQ line ----------------------------------------------
@@ -191,16 +193,20 @@ test('handleRequest: REQ line for mapped route includes the rewritten real model
 
   const reqLine = cap.lines.find((l) => /^\[\d{2}:\d{2}:\d{2} REQ /.test(l));
   assert.ok(reqLine, `expected a REQ line, got: ${JSON.stringify(cap.lines)}`);
-  assert.match(reqLine, /method=POST/);
-  assert.match(reqLine, /url=\/v1\/messages/);
-  // The model field on the REQ line is the rewritten one (MiniMax-M3).
-  assert.match(reqLine, /model=MiniMax-M3/);
-  assert.match(reqLine, /route=MiniMax-M3/);
-  assert.match(reqLine, /upstream=api\.minimax\.io/);
-  assert.match(reqLine, /user=u1/);
+  // Strip ANSI from the value part of `key=value` so the regex matches the
+  // color-wrapped model value (e.g. model=\x1B[36mMiniMax-M3\x1B[0m).
+  const stripped = reqLine.replace(/\x1b\[[0-9;]*m/g, '');
+  // Trimmed shape: only model and upstream, plus the bracket.
+  assert.match(stripped, /model=MiniMax-M3/);
+  assert.match(stripped, /upstream=api\.minimax\.io/);
+  // The dropped fields must not appear.
+  assert.doesNotMatch(stripped, /method=/);
+  assert.doesNotMatch(stripped, /url=/);
+  assert.doesNotMatch(stripped, /route=/);
+  assert.doesNotMatch(stripped, /user=/);
 });
 
-test('handleRequest: REQ line for unmapped model omits route and shows the default upstream', async () => {
+test('handleRequest: REQ line for unmapped model shows model and default upstream, no route or user', async () => {
   const cap = captureLog();
   try {
     const req = makePostReq({ model: 'claude-sonnet-4-6', messages: [] });
@@ -215,14 +221,18 @@ test('handleRequest: REQ line for unmapped model omits route and shows the defau
 
   const reqLine = cap.lines.find((l) => /^\[\d{2}:\d{2}:\d{2} REQ /.test(l));
   assert.ok(reqLine, `expected a REQ line, got: ${JSON.stringify(cap.lines)}`);
-  assert.match(reqLine, /method=POST/);
-  // For passthrough, model is whatever the body said and route is absent.
-  assert.match(reqLine, /model=claude-sonnet-4-6/);
-  assert.doesNotMatch(reqLine, /route=/);
-  assert.match(reqLine, /upstream=api\.anthropic\.com/);
+  // Strip ANSI so the regex matches the color-wrapped model value.
+  const stripped = reqLine.replace(/\x1b\[[0-9;]*m/g, '');
+  // For passthrough, model is whatever the body said.
+  assert.match(stripped, /model=claude-sonnet-4-6/);
+  assert.doesNotMatch(stripped, /route=/);
+  assert.doesNotMatch(stripped, /user=/);
+  assert.doesNotMatch(stripped, /method=/);
+  assert.doesNotMatch(stripped, /url=/);
+  assert.match(stripped, /upstream=api\.anthropic\.com/);
 });
 
-test('handleRequest: REQ line for a bodyless GET omits model and route', async () => {
+test('handleRequest: REQ line for a bodyless GET omits model', async () => {
   const cap = captureLog();
   try {
     const req = makeGetReq('/v1/models');
@@ -237,10 +247,10 @@ test('handleRequest: REQ line for a bodyless GET omits model and route', async (
 
   const reqLine = cap.lines.find((l) => /^\[\d{2}:\d{2}:\d{2} REQ /.test(l));
   assert.ok(reqLine, `expected a REQ line, got: ${JSON.stringify(cap.lines)}`);
-  assert.match(reqLine, /method=GET/);
-  assert.match(reqLine, /url=\/v1\/models/);
   assert.doesNotMatch(reqLine, /model=/);
   assert.doesNotMatch(reqLine, /route=/);
   assert.doesNotMatch(reqLine, /user=/);
+  assert.doesNotMatch(reqLine, /method=/);
+  assert.doesNotMatch(reqLine, /url=/);
   assert.match(reqLine, /upstream=api\.anthropic\.com/);
 });

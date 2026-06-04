@@ -161,12 +161,8 @@ export function handleRequest(req, res) {
 
     const session = sessionIdFromUserId(parsedBody?.metadata?.user_id);
     logReq(id, {
-      method: req.method,
-      url: req.url,
       model: parsedBody?.model,
-      route: route?.realModel,
       upstream: conn.url.host,
-      user: parsedBody?.metadata?.user_id,
       session,
     });
 
