@@ -180,7 +180,7 @@ function makeGetReq(url) {
 test('handleRequest: REQ line for mapped route includes the rewritten real model', async () => {
   const cap = captureLog();
   try {
-    const req = makePostReq({ model: 'claude-minimax', messages: [], metadata: { user_id: 'u1' } });
+    const req = makePostReq({ model: 'minimax', messages: [], metadata: { user_id: 'u1' } });
     const res = new Writable({ write(c, _e, cb) { cb(); } });
     res.writeHead = () => res;
     res.headersSent = false;

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import { extractUsageFromSse } from './inspect.js';
+import { extractUsageFromSse, hasCacheControl } from './inspect.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
@@ -36,6 +36,12 @@ const server = http.createServer((req, res) => {
       upstream: UPSTREAM.host,
       session: sessionIdFromUserId(parsed?.metadata?.user_id),
     });
+    // Phase 0 diagnostic: surface whether the request body contains a
+    // cache_control breakpoint. Not part of the REQ line by design (see
+    // 2026-06-02-routing-logging.md).
+    if (parsed) {
+      console.log(`  [diag] id=${id} cache_control_present=${hasCacheControl(parsed)}`);
+    }
 
     const upstreamPath = UPSTREAM.pathname.replace(/\/$/, '') + req.url;
     const headers = { ...req.headers };
