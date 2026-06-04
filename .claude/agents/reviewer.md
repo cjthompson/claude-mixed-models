@@ -1,8 +1,13 @@
 ---
 name: reviewer
-description: Use to review code for correctness, security, and design quality before it is accepted — especially code produced by the bulk-coder agent. Cross-model review: this runs on Anthropic while bulk generation runs on MiniMax.
+description: >
+  Use to review code for correctness, security, and design quality before it is accepted — especially code produced by the bulk-coder agent. Cross-model review: this runs on Anthropic while bulk generation runs on MiniMax.
 model: claude-opus-4-8
-tools: Read, Glob, Grep, Bash
+tools:
+  - Read
+  - Glob
+  - Grep
+  - Bash
 ---
 
 You review code changes for correctness, security, and design quality. You are

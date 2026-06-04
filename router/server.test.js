@@ -14,9 +14,9 @@ import { Writable } from 'node:stream';
 process.env.MINIMAX_API_KEY ||= 'test-key-not-used';
 process.env.ROUTER_PORT ||= '0';
 
-let applyAuth, forward, handleRequest, KNOWN_AUTH_MODES;
+let applyAuth, forward, handleRequest, KNOWN_AUTH_MODES, applyToolCompat;
 before(async () => {
-  ({ applyAuth, forward, handleRequest, KNOWN_AUTH_MODES } = await import('./server.js'));
+  ({ applyAuth, forward, handleRequest, KNOWN_AUTH_MODES, applyToolCompat } = await import('./server.js'));
 });
 
 // --- applyAuth -------------------------------------------------------------
@@ -44,6 +44,58 @@ test('applyAuth: x-api-key strips incoming auth and sets x-api-key: <key>', () =
 
 test('KNOWN_AUTH_MODES: lists the three recognized modes', () => {
   assert.deepEqual([...KNOWN_AUTH_MODES].sort(), ['bearer', 'passthrough', 'x-api-key']);
+});
+
+// --- applyToolCompat -------------------------------------------------------
+// MiniMax's Anthropic-compatible endpoint rejects any tool entry that
+// lacks an `input_schema` with "function name or parameters is empty".
+// Anthropic built-in server tools (web_fetch, web_search, bash, etc.) are
+// advertised with a `type` discriminator and no `input_schema`; the shim
+// injects a permissive schema so the entry is accepted. Entries that
+// already carry an `input_schema` are left alone. Keyed on upstream name
+// so Anthropic/passthrough traffic is untouched.
+
+test('applyToolCompat: minimax injects input_schema on entries that lack one', () => {
+  const body = {
+    model: 'minimax',
+    tools: [
+      { type: 'web_fetch_20250924', name: 'web_fetch' },
+      { type: 'web_search_20250305', name: 'web_search' },
+      { name: 'Read', description: 'Read a file', input_schema: { type: 'object' } },
+    ],
+  };
+  applyToolCompat(body, 'minimax');
+  assert.deepEqual(body.tools[0].input_schema, { type: 'object', additionalProperties: true });
+  assert.equal(body.tools[0].name, 'web_fetch');
+  assert.equal(body.tools[0].type, 'web_fetch_20250924');
+  assert.deepEqual(body.tools[1].input_schema, { type: 'object', additionalProperties: true });
+  // Pre-existing input_schema is preserved, not overwritten.
+  assert.deepEqual(body.tools[2].input_schema, { type: 'object' });
+});
+
+test('applyToolCompat: anthropic upstream is a no-op', () => {
+  const body = {
+    model: 'claude-opus-4-7',
+    tools: [{ type: 'web_fetch_20250924', name: 'web_fetch' }],
+  };
+  applyToolCompat(body, 'anthropic');
+  assert.equal(body.tools[0].input_schema, undefined);
+});
+
+test('applyToolCompat: body with no tools array is a no-op', () => {
+  const body = { model: 'minimax', messages: [] };
+  applyToolCompat(body, 'minimax');
+  assert.deepEqual(body, { model: 'minimax', messages: [] });
+});
+
+test('applyToolCompat: tool entries that already have input_schema are left alone', () => {
+  const body = {
+    model: 'minimax',
+    tools: [{ name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'string' } } } }],
+  };
+  const before = JSON.stringify(body);
+  applyToolCompat(body, 'minimax');
+  assert.equal(JSON.stringify(body), before);
 });
 
 // --- body-guard ------------------------------------------------------------

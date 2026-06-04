@@ -45,6 +45,31 @@ export function applyAuth(headers, conn) {
   else headers['x-api-key'] = conn.key;
 }
 
+// Upstream-keyed request-body shims. Anthropic-built-in server tools
+// (web_fetch, web_search, code_execution, bash, text_editor, memory) are
+// advertised with a `type: "web_fetch_20250924"`-style discriminator in
+// the `tools[]` array, and historically without a client-side
+// `input_schema`. Compatible providers (e.g. the MiniMax Anthropic-shaped
+// endpoint) require every tool entry to carry an `input_schema` and reject
+// the request with "function name or parameters is empty" when a server
+// tool arrives without one. Inject a permissive `input_schema` for any
+// entry that lacks one; the upstream ignores the schema's contents for
+// server tools (the model never sees the JSON schema — the platform
+// dispatches the tool). The shim is a no-op for passthrough/Anthropic so
+// native Anthropic traffic is untouched.
+export function applyToolCompat(body, upstreamName) {
+  if (upstreamName !== 'minimax') return;
+  if (!body || !Array.isArray(body.tools)) return;
+  let patched = 0;
+  for (const tool of body.tools) {
+    if (tool && typeof tool === 'object' && tool.input_schema == null) {
+      tool.input_schema = { type: 'object', additionalProperties: true };
+      patched++;
+    }
+  }
+  if (patched > 0) console.error(`[tool-compat] injected input_schema on ${patched} tool entry/entries for ${upstreamName}`);
+}
+
 export function forward(req, res, conn, outBody, { id, t0, session }) {
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
@@ -139,6 +164,7 @@ export function handleRequest(req, res) {
           return fail(res, 500, `router: ${err.message}`);
         }
         body.model = route.realModel;
+        applyToolCompat(body, route.upstream);
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
       } else {
         // Unmapped model → ride the default upstream untouched. For a Claude
