@@ -32,11 +32,8 @@ const server = http.createServer((req, res) => {
       }
     }
     logReq(id, {
-      method: req.method,
-      url: req.url,
       model: parsed?.model,
       upstream: UPSTREAM.host,
-      user: parsed?.metadata?.user_id,
       session: sessionIdFromUserId(parsed?.metadata?.user_id),
     });
 
