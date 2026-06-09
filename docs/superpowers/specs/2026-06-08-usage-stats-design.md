@@ -115,7 +115,7 @@ The `metadata.user_id` object is *not* captured — only the extracted `sessionI
 
 ### `router.stats.db` (SQLite, source of truth)
 
-Persistent — it lives at `STATS_DB_PATH` (default `~/.local/state/claude-mixed-models/router.stats.db`), **not** under `/tmp`, so a reboot or `/tmp` sweep can't wipe the source of truth. Only the transient `router.events.jsonl` write buffer lives in `/tmp`. The directory is created with `mkdirSync(..., { recursive: true })` on first open.
+Persistent — it lives at `STATS_DB_PATH` (default `~/.local/state/claude-mixed-models/router.stats.db`), **not** under `/tmp`, so a reboot or `/tmp` sweep can't wipe the source of truth. Only the transient `router.events.jsonl` write buffer lives in `/tmp`. The batcher is the only writer, and on startup it `mkdirSync(dirname(STATS_DB_PATH), { recursive: true })` *before* opening the DB, so a fresh install never fails with a missing-directory error.
 
 Built-in `node:sqlite` (`DatabaseSync` from `node:sqlite`, available in Node 22.5+ as experimental, stable in Node 24+; the project's `.nvmrc` / no-pin and the existing v26.0.0 runtime qualify). No native dependency. WAL mode enabled via `PRAGMA journal_mode=WAL` in the schema file so readers don't block writers.
 
@@ -278,7 +278,7 @@ Vanilla HTML/CSS/JS, no build step, no framework. `chart.js` is **vendored** int
 | Errors | last 24h, count by status code |
 | Today's totals | one-line summary: N requests, X tokens, $est cost |
 
-**Cost estimate:** a small per-model rate map keyed by the alias `model` (which maps 1:1 to a real model, so the rate is unambiguous and the rollups — which carry the alias, not `real_model` — can be priced directly). Four rates each (input, output, cache-read, cache-write per M tokens) so MiniMax and Anthropic — which differ ~10x, and whose cache reads are ~10x cheaper than fresh input — aren't blended into one misleading number. An unknown alias falls back to a flagged default rate. Still labeled an estimate; the map is a code constant in v1 (full configurability is future work).
+**Cost estimate:** a small per-model rate map keyed by the alias `model` (which maps 1:1 to a real model, so the rate is unambiguous and the rollups — which carry the alias, not `real_model` — can be priced directly). Four rates each (input, output, cache-read, cache-write per M tokens) so MiniMax and Anthropic — which differ ~10x, and whose cache reads are ~10x cheaper than fresh input — aren't blended into one misleading number. An unknown alias falls back to a flagged default rate, and the cost card renders the rate label in dim text plus a "?" suffix on the figure (e.g. `$0.42?`) so the estimate's lower confidence is visible at a glance. Still labeled an estimate; the map is a code constant in v1 (full configurability is future work).
 
 ### Color reuse
 
