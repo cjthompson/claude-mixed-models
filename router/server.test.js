@@ -1,4 +1,4 @@
-import { test, before, after } from 'node:test';
+import { test, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
@@ -6,7 +6,7 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,6 +27,19 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED ||= '0';
 let applyAuth, forward, handleRequest, KNOWN_AUTH_MODES, applyToolCompat, installShutdown;
 before(async () => {
   ({ applyAuth, forward, handleRequest, KNOWN_AUTH_MODES, applyToolCompat, installShutdown } = await import('./server.js'));
+});
+
+// Hermetic STATS_EVENTS_FILE: every test gets its own tmpdir so the new
+// logEvent call inside finalize() doesn't write to /tmp. Cleared in afterEach
+// so a stray file from a test can't leak into the next.
+let statsDir;
+beforeEach(() => {
+  statsDir = mkdtempSync(join(tmpdir(), 'router-stats-'));
+  process.env.STATS_EVENTS_FILE = join(statsDir, 'events.jsonl');
+});
+afterEach(() => {
+  delete process.env.STATS_EVENTS_FILE;
+  rmSync(statsDir, { recursive: true, force: true });
 });
 
 // --- applyAuth -------------------------------------------------------------
@@ -742,4 +755,53 @@ test('installShutdown: second SIGTERM during drain — destroys remaining socket
     cap.restore();
     await new Promise((resolve) => srv.close(resolve));
   }
+});
+
+// --- finalize() → logEvent wiring ------------------------------------------
+// Every successful request must produce a JSONL record in STATS_EVENTS_FILE.
+// We don't stand up a real upstream here — the test's goal is to assert the
+// event-emission wiring, not the upstream behavior. The mock upstream in
+// handleRequest is good enough: the unmapped-model path falls through to
+// 127.0.0.1:1, the request fails with 502, and finalize() still fires with
+// the model fields populated. (We just need to see *one* event line.)
+
+test('handleRequest: writes a JSONL event line on successful completion', async () => {
+  // For this test we DO need a real upstream so the request reaches a
+  // normal-end finalize (status=200) — otherwise we can only assert a 502
+  // event. Reuse fakeUpstream from the SSE suite.
+  const conn = { url: new URL(`https://127.0.0.1:${fakeUpstream.port}`), key: null, auth: 'passthrough' };
+  fakeUpstream.respond = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(SAMPLE_SSE);
+  };
+
+  // Bypass handleRequest's hard-coded route-to-MiniMax-upstream path (the
+  // test env has no MINIMAX_API_KEY bound to that upstream name) by going
+  // through forward() directly. This still exercises finalize()'s new
+  // logEvent call, which is what the assertion targets.
+  const { req, res } = makeObservableReqRes();
+  forward(req, res, conn, Buffer.from('{"model":"minimax"}'), {
+    id: 'event-test',
+    t0: Date.now() - 5,
+    session: null,
+    model: 'minimax',
+    realModel: 'MiniMax-M3',
+  });
+  await new Promise((resolve, reject) => {
+    res.on('finish', resolve);
+    res.on('error', reject);
+    setTimeout(() => reject(new Error('forward timed out after 5s')), 5000);
+  });
+
+  const eventsPath = process.env.STATS_EVENTS_FILE;
+  assert.ok(existsSync(eventsPath), 'expected event file to exist');
+  const lines = readFileSync(eventsPath, 'utf8').trim().split('\n').filter(Boolean);
+  assert.ok(lines.length >= 1, `expected at least one event, got: ${lines.length}`);
+  const rec = JSON.parse(lines[lines.length - 1]);
+  assert.equal(rec.model, 'minimax');
+  assert.equal(rec.real_model, 'MiniMax-M3');
+  // upstream is host:port; only the host part is stable across runs.
+  assert.match(rec.upstream, /^127\.0\.0\.1(:\d+)?$/);
+  assert.equal(rec.status, 200);
+  assert.equal(rec.sessionId, null);
 });

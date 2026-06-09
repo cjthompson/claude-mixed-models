@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { resolveRoute } from './routes.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 import { extractUsageFromSse } from '../lib/sse.js';
+import { logEvent } from '../lib/event.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const config = JSON.parse(readFileSync(join(here, 'routes.config.json'), 'utf8'));
@@ -71,7 +72,7 @@ export function applyToolCompat(body, upstreamName) {
   if (patched > 0) console.error(`[tool-compat] injected input_schema on ${patched} tool entry/entries for ${upstreamName}`);
 }
 
-export function forward(req, res, conn, outBody, { id, t0, session }) {
+export function forward(req, res, conn, outBody, { id, t0, session, model, realModel }) {
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
   headers.host = conn.url.host;
@@ -89,6 +90,20 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
     if (done) return;
     done = true;
     logRes(id, fields);
+    // Best-effort event sink. Fire-and-forget; errors are swallowed inside logEvent.
+    logEvent({
+      id,
+      model: fields.model,
+      real_model: fields.real_model,
+      upstream: fields.upstream,
+      status: fields.status,
+      durationMs: fields.durationMs,
+      sessionId: fields.session,
+      input_tokens: fields.usage?.input_tokens ?? 0,
+      output_tokens: fields.usage?.output_tokens ?? 0,
+      cache_read_input_tokens: fields.usage?.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: fields.usage?.cache_creation_input_tokens ?? 0,
+    });
   };
   // TEMPORARY HEADER DIAGNOSTIC
   const cacheHeaders = Object.fromEntries(
@@ -142,6 +157,8 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
             durationMs: Date.now() - t0,
             usage: null,
             session,
+            model,
+            real_model: realModel,
           });
           return;
         }
@@ -157,6 +174,8 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
           durationMs: Date.now() - t0,
           usage,
           session,
+          model,
+          real_model: realModel,
         });
       });
     }
@@ -172,6 +191,8 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
       durationMs: Date.now() - t0,
       usage: null,
       session,
+      model,
+      real_model: realModel,
     });
   });
   upstreamReq.on('error', (err) => {
@@ -185,6 +206,8 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
       durationMs: Date.now() - t0,
       usage: null,
       session,
+      model,
+      real_model: realModel,
     });
   });
   upstreamReq.write(outBody);
@@ -224,6 +247,8 @@ export function handleRequest(req, res) {
     // Only POSTs with a JSON body carry a model to route on. Everything else
     // (GET /v1/models on startup, bodyless calls) rides the default upstream untouched.
     let conn, outBody, route, parsedBody;
+    let originalModel = null;
+    let realModel = null;
     if (req.method === 'POST' && raw.length) {
       let body;
       try {
@@ -235,6 +260,10 @@ export function handleRequest(req, res) {
         return fail(res, 400, 'router: body must be a JSON object');
       }
       parsedBody = body;
+      // Capture the user-supplied alias before the route rewrites body.model.
+      // This is what we want to record in the stats event so we can attribute
+      // usage back to the alias the caller asked for.
+      originalModel = body.model;
       route = resolveRoute(body.model, config.routes);
       if (route) {
         try {
@@ -242,6 +271,7 @@ export function handleRequest(req, res) {
         } catch (err) {
           return fail(res, 500, `router: ${err.message}`);
         }
+        realModel = route.realModel;
         body.model = route.realModel;
         applyToolCompat(body, route.upstream);
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
@@ -253,6 +283,7 @@ export function handleRequest(req, res) {
         } catch (err) {
           return fail(res, 500, `router: ${err.message}`);
         }
+        realModel = originalModel;
         outBody = raw;
       }
     } else {
@@ -271,7 +302,7 @@ export function handleRequest(req, res) {
       session,
     });
 
-    forward(req, res, conn, outBody, { id, t0, session });
+    forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel });
   });
 }
 
