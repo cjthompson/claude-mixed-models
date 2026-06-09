@@ -21,10 +21,10 @@ The router already captures everything we need on every request — `model`, `up
 
 ## Architecture
 
-Three long-running services, **one orchestrator plist**:
+Two long-running services, **one orchestrator that lives in `scripts/`**:
 
 ```
-Claude Code ──HTTP──▶ router (plist) ──HTTP──▶ MiniMax / Anthropic
+Claude Code ──HTTP──▶ router (plist, unchanged) ──HTTP──▶ MiniMax / Anthropic
                           │
                           │ logEvent() appends JSON line
                           ▼
@@ -32,21 +32,23 @@ Claude Code ──HTTP──▶ router (plist) ──HTTP──▶ MiniMax / Ant
                           │
                           │ fs.watch + 10s safety timer
                           ▼
-              ┌─────── stats daemon (plist) ───────┐
-              │                                      │
-              │   ┌─ batcher child ──┐  ┌─ http child ─┐
-              │   │ reads JSONL      │  │ serves / and  │
-              │   │ writes SQLite    │  │ /api/stats     │
-              │   │ unlinks JSONL    │  │ queries SQLite │
-              │   └──────────────────┘  └───────────────┘
-              │           │                  │
-              └───────────┴──────────────────┘
-                          │
-                          ▼
+              ┌─────── scripts/server.mjs (one plist) ───────┐
+              │                                                │
+              │   ┌─ batcher child ──┐   ┌─ http child ─┐       │
+              │   │ reads JSONL      │   │ serves / and │       │
+              │   │ writes SQLite    │   │ /api/stats   │       │
+              │   │ unlinks JSONL    │   │ queries db   │       │
+              │   └──────────────────┘   └──────────────┘       │
+              │           │                     │               │
+              └───────────┴─────────────────────┘               │
+                          │                                     │
+                          ▼                                     │
                      router.stats.db          ◀── source of truth
 ```
 
-The router is unchanged in topology; one new `logEvent()` call inside `forward()`. The stats service is a single plist (`com.claude-mixed-models.stats`) that runs `bin/stats-daemon.mjs`, which spawns two child processes — batcher and HTTP server — and supervises them (respawn on exit, forward SIGTERM). The CLI (`bin/stats-cli.mjs`) and tests import the worker modules directly, so they don't need the daemon.
+`scripts/server.mjs` is the single entry point for everything stats-related. It spawns the batcher and HTTP server as child processes, supervises them, and forwards signals. The router plist is left untouched.
+
+The router is unchanged in topology; one new `logEvent()` call inside `forward()`. The stats service is a single plist (`com.claude-mixed-models.stats`) that runs `scripts/server.mjs`, which spawns two child processes — batcher and HTTP server — and supervises them (respawn on exit, forward SIGTERM). The CLI (`bin/stats-cli.mjs`) and tests import the worker modules directly, so they don't need the orchestrator.
 
 ### Why child processes, not worker threads
 
@@ -54,10 +56,11 @@ The router is unchanged in topology; one new `logEvent()` call inside `forward()
 - No shared state to manage — they communicate only through the SQLite file, which WAL mode makes concurrent-safe.
 - If the dashboard ever needs to move to a different machine, the child boundary is already there.
 
-### Why a daemon, not three plists
+### Why a single orchestrator
 
 - One `KeepAlive` target, one log file, one service to `launchctl start|stop`.
 - The orchestrator is ~30 lines: spawn, respawn, signal-forward. No IPC, no state.
+- The router plist stays untouched and orthogonal — its lifecycle is independent of stats.
 
 ## Event sink
 
@@ -196,7 +199,7 @@ Best-effort throughout. A bad JSONL line is skipped. A DB error is logged and th
 - Each `/api/stats` request runs the card queries; results are JSON-serialized with the existing `__abbrev` helper so the dashboard sees compact numbers.
 - The HTTP server reuses the same `http` module pattern as `router/server.js`, including the `installShutdown`-style graceful shutdown.
 
-## Daemon (`bin/stats-daemon.mjs`)
+## Orchestrator (`scripts/server.mjs`)
 
 ```js
 import { spawn } from 'node:child_process';
@@ -206,14 +209,14 @@ const children = [
 ];
 for (const child of children) {
   child.on('exit', (code) => {
-    console.error(`[stats-daemon] ${child.spawnargs.join(' ')} exited with code ${code}, respawning in 1s`);
+    console.error(`[stats] ${child.spawnargs.join(' ')} exited with code ${code}, respawning in 1s`);
     setTimeout(() => respawn(child), 1000);
   });
 }
 process.on('SIGTERM', () => { for (const c of children) c.kill('SIGTERM'); process.exit(0); });
 ```
 
-No IPC, no shared state. Each child is a self-contained module. The daemon is ~30 lines.
+`scripts/server.mjs` lives in the existing `scripts/` directory alongside the other operational scripts (the install script, the plist, the run scripts). It's the single entry point for everything stats-related. No IPC, no shared state. Each child is a self-contained module. The orchestrator is ~30 lines.
 
 ## CLI (`bin/stats-cli.mjs`)
 
@@ -251,7 +254,7 @@ The djb2-of-first-8-chars hash from `__colorEscapeForModel` in `lib/log.js` is r
 | Service | Binary | Port | Log files |
 |---|---|---|---|
 | `com.claude-mixed-models.router` (unchanged) | `router/server.js` | 8788 | `router.log`, `router.err.log` |
-| `com.claude-mixed-models.stats` (new) | `bin/stats-daemon.mjs` | 8789 (via child) | `stats/daemon.log`, `stats/daemon.err.log` |
+| `com.claude-mixed-models.stats` (new) | `scripts/server.mjs` | 8789 (via child) | `stats/server.log`, `stats/server.err.log` |
 
 `scripts/install-services.sh` (renamed from `install-router-service.sh`) installs both. `package.json`'s `install-service` script is renamed to `install-services`.
 
@@ -274,12 +277,12 @@ stats/
   workers/server.test.js
   queries.test.js
 bin/
-  stats-daemon.mjs
   stats-cli.mjs
 lib/
   event.js
   event.test.js
 scripts/
+  server.mjs                (the orchestrator)
   install-services.sh
   com.claude-mixed-models.stats.plist
   com.claude-mixed-models.router.plist  (unchanged)
@@ -317,7 +320,7 @@ Best-effort throughout. No retry queues, no quarantine files, no health-check en
 - **Batcher:** bad JSONL line → log + skip. DB error → log + leave JSONL alone (next pass retries).
 - **HTTP server:** DB missing → empty JSON payload, dashboard shows "no data yet". DB busy → `node:sqlite` throws after its default timeout; server returns 500, dashboard shows the error in a corner.
 - **CLI:** DB missing → print "no data yet", exit 0.
-- **Daemon:** child exits → wait 1s, respawn. No exponential backoff (one zombie child is easier to debug than a throttled respawn).
+- **Orchestrator:** child exits → wait 1s, respawn. No exponential backoff (one zombie child is easier to debug than a throttled respawn).
 - **Time zones:** `ts` stored UTC. "Today" is computed in the user's local timezone (matches `/status`).
 - **Disk usage:** not monitored. At ~150 bytes/event and ~10k req/day, the `events` table grows ~1.5 MB/day. SQLite handles this fine; we don't `VACUUM` on any schedule.
 
