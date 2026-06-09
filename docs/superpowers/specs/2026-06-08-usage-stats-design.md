@@ -67,14 +67,23 @@ The router is unchanged in topology; one new `logEvent()` call inside `forward()
 `lib/event.js` (new, separate from `lib/log.js` to keep concerns split):
 
 ```js
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+const EVENTS_FILE = process.env.STATS_EVENTS_FILE ?? '/tmp/claude-mixed-models/router.events.jsonl';
+try { mkdirSync(dirname(EVENTS_FILE), { recursive: true }); } catch { /* best-effort */ }
+
+// Best-effort: a failed append must never throw on the router's response path.
 export function logEvent(fields) {
-  appendFileSync(process.env.STATS_EVENTS_FILE ?? '/tmp/claude-mixed-models/router.events.jsonl',
-    JSON.stringify({ ...fields, ts: new Date().toISOString() }) + '\n');
+  try {
+    appendFileSync(EVENTS_FILE, JSON.stringify({ ...fields, ts: new Date().toISOString() }) + '\n');
+  } catch (err) {
+    console.error('[stats] logEvent failed (dropping event):', err.message);
+  }
 }
 ```
 
-Called from `router/server.js` inside `forward()`, immediately after `extractUsageFromSse` resolves. No new dependencies on the hot path beyond a single `appendFileSync`.
+Called from `router/server.js` inside **`finalize()`** (the single terminal path shared by all four request exits: normal end, empty-200→502, client-close 499, and upstream-error 502). `finalize` already dedupes via its `done` flag, so each request emits exactly one event. Hooking here — rather than "after `extractUsageFromSse` resolves", which only runs on the normal-end path — is what guarantees the 499/502 statuses in the record table below actually get logged. `finalize`'s existing fields (`upstream`, `status`, `durationMs`, `usage`, `session`) plus `id`, `model` (the alias, captured in `handleRequest` *before* `body.model` is reassigned to `route.realModel`), and `real_model` (all threaded into `forward()`'s opts) feed `logEvent`; on the 499/502/empty paths `usage` is `null`, so token fields default to 0. The directory is created once at module load and the append is wrapped in try/catch, so the sink can never throw on the hot path. No new dependencies beyond a single guarded `appendFileSync`.
 
 **Event record** (~150 bytes per line):
 
@@ -82,18 +91,18 @@ Called from `router/server.js` inside `forward()`, immediately after `extractUsa
 |---|---|---|
 | `ts` | ISO 8601 string | `new Date().toISOString()` at log time |
 | `id` | 8-char hex | existing `newRequestId()` from `lib/log.js` |
-| `model` | string | request body's `model` field (e.g. `minimax`, `claude-haiku-4-5-20251001`) |
+| `model` | string | the client-requested **alias**, captured *before* the route rewrite (e.g. `minimax`, `minimax-m2.7`, `claude-opus-4-8`) |
+| `real_model` | string | the resolved upstream model after `route.realModel` rewrite (e.g. `MiniMax-M3`); equals `model` for passthrough/unmapped traffic |
 | `upstream` | hostname | `conn.url.host` |
 | `status` | integer | upstream HTTP status (or 499 on client cancel, 502 on empty body) |
 | `durationMs` | integer | `Date.now() - t0` |
 | `sessionId` | UUID string \| null | existing `sessionIdFromUserId()` extraction |
-| `cwd` | string | captured once at router startup |
 | `input_tokens` | integer | from `usage.input_tokens` (0 if absent) |
 | `output_tokens` | integer | from `usage.output_tokens` |
 | `cache_read_input_tokens` | integer | from `usage.cache_read_input_tokens` |
 | `cache_creation_input_tokens` | integer | from `usage.cache_creation_input_tokens` |
 
-`cwd` is captured in `handleRequest` from `process.cwd()` and threaded through to `forward()`. The `metadata.user_id` object is *not* captured — only the extracted `sessionId` UUID. Request bodies and message contents are *never* captured.
+The `metadata.user_id` object is *not* captured — only the extracted `sessionId` UUID. Request bodies and message contents are *never* captured. (A `cwd` field was considered and dropped: the only value the router can read is `process.cwd()`, which is its own launchd working directory — a constant across every event, not the client's project directory — so it carries no signal.)
 
 ## Storage
 
@@ -102,9 +111,11 @@ Called from `router/server.js` inside `forward()`, immediately after `extractUsa
 - Owned by the router process (writable by router's user).
 - Append-only while the batcher reads it.
 - The batcher truncates the file to 0 bytes after each successful insert pass.
-- Worst case on crash: the next batcher run picks up where it left off.
+- Worst case on crash (truncate never ran): the whole file is re-read on the next pass. That's safe — `INSERT OR IGNORE` plus recompute-from-`events` make a re-read idempotent, so re-processing already-inserted lines changes nothing.
 
 ### `router.stats.db` (SQLite, source of truth)
+
+Persistent — it lives at `STATS_DB_PATH` (default `~/.local/state/claude-mixed-models/router.stats.db`), **not** under `/tmp`, so a reboot or `/tmp` sweep can't wipe the source of truth. Only the transient `router.events.jsonl` write buffer lives in `/tmp`. The directory is created with `mkdirSync(..., { recursive: true })` on first open.
 
 Built-in `node:sqlite` (`DatabaseSync` from `node:sqlite`, available in Node 22.5+ as experimental, stable in Node 24+; the project's `.nvmrc` / no-pin and the existing v26.0.0 runtime qualify). No native dependency. WAL mode enabled via `PRAGMA journal_mode=WAL` in the schema file so readers don't block writers.
 
@@ -115,18 +126,21 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;     -- safe with WAL; ~2x faster than FULL
 
 CREATE TABLE IF NOT EXISTS events (
-  id                          TEXT PRIMARY KEY,
+  id                          TEXT NOT NULL,
   ts                          TEXT NOT NULL,
-  model                       TEXT NOT NULL,
+  model                       TEXT NOT NULL,   -- client-requested alias
+  real_model                  TEXT NOT NULL,   -- resolved upstream model
   upstream                    TEXT NOT NULL,
   status                      INTEGER NOT NULL,
   duration_ms                 INTEGER NOT NULL,
   session_id                  TEXT,
-  cwd                         TEXT,
   input_tokens                INTEGER NOT NULL DEFAULT 0,
   output_tokens               INTEGER NOT NULL DEFAULT 0,
   cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
-  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0
+  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  -- (id, ts) rather than id alone: retried JSONL lines still dedup (same id+ts),
+  -- but a real 32-bit id collision must also share an exact ms timestamp to drop.
+  PRIMARY KEY (id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts       ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_model    ON events(model);
@@ -158,8 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_5m_bucket ON rollup_5m(bucket_start);
 | Card | Range | Reads from |
 |---|---|---|
 | Tokens/day (last 30d) | 30d | `rollup_1d` |
-| Tokens/day (last 7d) | 7d | `rollup_1h`, GROUP BY date |
-| Requests/hour (last 24h) | 24h | `rollup_5m`, GROUP BY hour |
+| Requests by hour-of-day (7d) | 7d | `rollup_1h`, GROUP BY hour-of-day (0–23) |
 | Cache hit rate (last 7d) | 7d | `rollup_1h` |
 | Top models (last 7d) | 7d | `rollup_1h`, ORDER BY SUM(input) |
 | Top sessions (last 7d) | 7d | `events` (sparse; rollups don't carry session_id) |
@@ -170,7 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_5m_bucket ON rollup_5m(bucket_start);
 
 ### Percentiles
 
-`p50_ms` and `p95_ms` are precomputed in the batcher. For each (bucket, model, upstream), the batcher keeps a small in-memory reservoir of durations for the current 5-minute window and computes percentiles on bucket rollover. ~144 buckets/day/model is cheap to recompute.
+`p50_ms` and `p95_ms` are precomputed in the batcher, but **derived from `events`, not an in-memory reservoir**. Each pass recomputes every touched bucket's rollup row (see §Batcher) by aggregating that bucket's `events.duration_ms` directly, so percentiles need no cross-pass state and a batcher respawn loses nothing. Each (bucket, model, upstream) holds at most a few hundred rows for a 5-minute window — sorting them to pick p50/p95 in JS is trivial, and only buckets touched by the current pass are recomputed.
 
 ## Batcher worker (`stats/workers/batcher.mjs`)
 
@@ -180,22 +193,29 @@ open SQLite, exec schema.sql (idempotent), set prepared insert
 loop:
   await wait for fs.watch 'change' OR 10s safety timer
   read all lines from JSONL
+  touched = {}  // set of (bucket_start, model, upstream) across all three grains
   for each line:
-    try parse + insert; on error, log + skip
-  for each (bucket, model, upstream) touched:
-    UPDATE rollup_5m SET requests += ..., errors += ...
+    try parse + INSERT OR IGNORE; on error, log + skip
+    record the 5m/1h/1d buckets this event falls into in `touched`
+  for each (grain, bucket_start, model, upstream) in touched:
+    recompute the rollup row from events:
+      SELECT count, errors, SUM(tokens...), p50/p95 FROM events
+        WHERE ts in [bucket_start, bucket_end) AND model=? AND upstream=?
+    UPSERT the full row (INSERT ... ON CONFLICT DO UPDATE SET <recomputed values>)
   COMMIT
   truncate JSONL to 0 bytes
 ```
 
-Best-effort throughout. A bad JSONL line is skipped. A DB error is logged and the JSONL is *not* truncated (next pass retries). No retry queue, no quarantine file, no max-line-bytes watchdog.
+Rollups are **recomputed from `events`, never incremented.** This is what makes a pass idempotent: events use `INSERT OR IGNORE` (deduped by the `(id, ts)` primary key), so a retried pass — e.g. after a DB error left the JSONL untruncated — re-derives the same rollup values instead of double-counting. Recomputing only the touched buckets keeps each pass O(rows-in-this-batch), and it preserves the property-test invariant `SUM(rollup_1d.requests) == COUNT(events)` per day by construction.
+
+Best-effort throughout. A bad JSONL line is skipped. A DB error is logged and the JSONL is *not* truncated (next pass retries; recompute makes the retry safe). No retry queue, no quarantine file, no max-line-bytes watchdog.
 
 ## HTTP worker (`stats/workers/server.mjs`)
 
 - Listens on `STATS_PORT` (default 8789).
 - `GET /` → `stats/public/index.html` (single self-contained file, no build step, no framework).
 - `GET /api/stats?range=24h|7d|30d|all` → JSON for the cards.
-- Opens the SQLite DB read-only (`new DatabaseSync(path, { readOnly: true })`).
+- Opens the SQLite DB read-only (`new DatabaseSync(path, { readOnly: true })`). With WAL, a read-only connection still needs the `-shm`/`-wal` sidecars accessible to see the batcher's latest commits — they live alongside the DB under `STATS_DB_PATH`, so the reader and batcher sharing that directory is required. A read-only reader cannot run WAL recovery, so it must never be the only connection that touches a freshly created DB; in practice the batcher creates and checkpoints the DB first.
 - Each `/api/stats` request runs the card queries; results are JSON-serialized with the existing `__abbrev` helper so the dashboard sees compact numbers.
 - The HTTP server reuses the same `http` module pattern as `router/server.js`, including the `installShutdown`-style graceful shutdown.
 
@@ -203,18 +223,33 @@ Best-effort throughout. A bad JSONL line is skipped. A DB error is logged and th
 
 ```js
 import { spawn } from 'node:child_process';
-const children = [
-  spawn('node', ['stats/workers/batcher.mjs'], { stdio: 'inherit' }),
-  spawn('node', ['stats/workers/server.mjs'],  { stdio: 'inherit' }),
-];
-for (const child of children) {
-  child.on('exit', (code) => {
-    console.error(`[stats] ${child.spawnargs.join(' ')} exited with code ${code}, respawning in 1s`);
-    setTimeout(() => respawn(child), 1000);
+
+const SCRIPTS = ['stats/workers/batcher.mjs', 'stats/workers/server.mjs'];
+const procs = new Map();            // script -> ChildProcess
+let shuttingDown = false;
+
+function start(script) {
+  const child = spawn('node', [script], { stdio: 'inherit' });
+  procs.set(script, child);
+  child.on('exit', (code, signal) => {
+    if (shuttingDown) return;        // expected during graceful stop
+    console.error(`[stats] ${script} exited (code=${code} signal=${signal}); respawning in 1s`);
+    setTimeout(() => start(script), 1000);   // re-registers its own exit handler
   });
 }
-process.on('SIGTERM', () => { for (const c of children) c.kill('SIGTERM'); process.exit(0); });
+for (const s of SCRIPTS) start(s);
+
+process.on('SIGTERM', async () => {
+  shuttingDown = true;
+  await Promise.all([...procs.values()].map((c) => new Promise((resolve) => {
+    c.once('exit', resolve);
+    c.kill('SIGTERM');               // let each child run its own graceful shutdown
+  })));
+  process.exit(0);
+});
 ```
+
+Keying live children by script name (rather than holding a stale array reference) means a respawned child re-registers its own `exit` handler and SIGTERM always targets the *current* child. The `shuttingDown` flag distinguishes an intentional stop from a crash so we don't respawn during shutdown, and the parent waits for every child to actually exit before exiting itself. No exponential backoff — a fixed 1s respawn is deliberate (a throttled respawn is harder to reason about than one visibly-flapping child).
 
 `scripts/server.mjs` lives in the existing `scripts/` directory alongside the other operational scripts (the install script, the plist, the run scripts). It's the single entry point for everything stats-related. No IPC, no shared state. Each child is a self-contained module. The orchestrator is ~30 lines.
 
@@ -229,21 +264,21 @@ Both modes open the SQLite DB read-only. If the DB is missing, print "no data ye
 
 ## Dashboard (`stats/public/`)
 
-Vanilla HTML/CSS/JS, no build step, no framework. `chart.js` loaded from CDN as a single `<script>` line. Auto-refresh every 10s (same cadence as the batcher, so the dashboard is always within one batch of live).
+Vanilla HTML/CSS/JS, no build step, no framework. `chart.js` is **vendored** into `stats/public/chart.min.js` (pinned version, referenced with a relative `<script src>`) so the localhost dashboard renders offline and the dependency can't drift. Auto-refresh every 10s (same cadence as the batcher, so the dashboard is always within one batch of live).
 
 ### Cards
 
 | Card | What it shows |
 |---|---|
 | Tokens/day | stacked bar chart, 30 days, by model |
-| Requests/hour | bar chart, 24 buckets, all-time — surfaces time-of-day pattern |
+| Requests by hour-of-day | bar chart, 24 buckets (hours 0–23) aggregated over the last 7d — surfaces the recurring time-of-day pattern |
 | Cache hit rate | per-model bar chart, "uncached-token spend" signal |
 | Top models | table: model, requests, in/out tokens, error %, p50/p95 latency |
 | Top sessions | table: session_id (truncated, color-swatched), requests, total tokens, duration span |
 | Errors | last 24h, count by status code |
 | Today's totals | one-line summary: N requests, X tokens, $est cost |
 
-**Cost estimate:** rough $0.15/M input, $0.60/M output (Sonnet-ish averages). Labeled as estimate. Not configurable in v1.
+**Cost estimate:** a small per-model rate map keyed by the alias `model` (which maps 1:1 to a real model, so the rate is unambiguous and the rollups — which carry the alias, not `real_model` — can be priced directly). Four rates each (input, output, cache-read, cache-write per M tokens) so MiniMax and Anthropic — which differ ~10x, and whose cache reads are ~10x cheaper than fresh input — aren't blended into one misleading number. An unknown alias falls back to a flagged default rate. Still labeled an estimate; the map is a code constant in v1 (full configurability is future work).
 
 ### Color reuse
 
@@ -258,7 +293,7 @@ The djb2-of-first-8-chars hash from `__colorEscapeForModel` in `lib/log.js` is r
 
 `scripts/install-services.sh` (renamed from `install-router-service.sh`) installs both. `package.json`'s `install-service` script is renamed to `install-services`.
 
-**State directory:** all files live under `STATS_STATE_DIR` (default `/tmp/claude-mixed-models/`). `STATS_PORT` defaults to 8789. Both go in `.env.example`.
+**State directories:** the persistent DB lives at `STATS_DB_PATH` (default `~/.local/state/claude-mixed-models/router.stats.db`); the transient JSONL buffer lives at `STATS_EVENTS_FILE` (default `/tmp/claude-mixed-models/router.events.jsonl`). `STATS_PORT` defaults to 8789. All three go in `.env.example`.
 
 ## File layout
 
@@ -273,6 +308,7 @@ stats/
     index.html
     app.js
     style.css
+    chart.min.js            (vendored, pinned)
   workers/batcher.test.js
   workers/server.test.js
   queries.test.js
@@ -308,6 +344,7 @@ README.md
 - `stats/queries.test.js` — build an in-memory `DatabaseSync`, insert known rows, assert each card query returns expected shape and sums.
 - `stats/workers/batcher.test.js` — write 5 lines to a temp JSONL, run one batcher pass, assert `events` has 5 rows and the JSONL is truncated. Write 3 more with one duplicate id, assert only 2 new rows.
 - `stats/workers/server.test.js` — start the HTTP server on an ephemeral port, `fetch('/api/stats?range=24h')`, assert JSON shape. Tear down.
+- **Read-only WAL visibility** — open a writer (batcher-style) and a separate `readOnly: true` reader against the same WAL DB; commit a row from the writer *after* the reader opened, then assert the reader observes it. Guards against the read-only-WAL stale-read footgun.
 
 **Property test (one):** for a random sequence of events, after the batcher runs, `SUM(rollup_1d.requests)` for a given day equals `COUNT(*)` of raw events for that day. Cheap, catches off-by-one bugs.
 
