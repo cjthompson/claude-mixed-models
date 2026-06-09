@@ -1,0 +1,35 @@
+:root {
+  --bg: #1a1a1a;
+  --card-bg: #242424;
+  --fg: #e0e0e0;
+  --muted: #888;
+  --accent: #4a86e8;
+  --error: #fb4c2f;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: -apple-system, system-ui, sans-serif; margin: 0; }
+header {
+  padding: 1rem 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #333;
+}
+header h1 { margin: 0; font-size: 1.25rem; font-weight: 500; }
+header select { background: var(--card-bg); color: var(--fg); border: 1px solid #444; padding: 0.4rem 0.6rem; border-radius: 4px; }
+main {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1rem;
+  padding: 1rem;
+}
+.card { background: var(--card-bg); border-radius: 6px; padding: 1rem 1.2rem; }
+.card h2 { margin: 0 0 0.8rem 0; font-size: 0.95rem; font-weight: 500; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th, td { padding: 0.4rem 0.5rem; text-align: left; border-bottom: 1px solid #333; }
+th { color: var(--muted); font-weight: 500; }
+.totals { display: flex; gap: 1.5rem; }
+.totals > div { display: flex; flex-direction: column; }
+.totals .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.totals .value { font-size: 1.4rem; font-weight: 500; }
+.session-swatch { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.4rem; vertical-align: middle; }

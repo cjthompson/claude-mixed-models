@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Usage stats</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="chart.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Usage stats</h1>
+    <select id="range">
+      <option value="24h">Last 24h</option>
+      <option value="7d" selected>Last 7 days</option>
+      <option value="30d">Last 30 days</option>
+      <option value="all">All time</option>
+    </select>
+  </header>
+  <main>
+    <section class="card" id="card-totals">
+      <h2>Today</h2>
+      <div class="totals" id="totals"></div>
+    </section>
+    <section class="card">
+      <h2>Tokens per day</h2>
+      <canvas id="chart-tokens" height="120"></canvas>
+    </section>
+    <section class="card">
+      <h2>Requests by hour-of-day</h2>
+      <canvas id="chart-hours" height="120"></canvas>
+    </section>
+    <section class="card">
+      <h2>Cache hit rate by model</h2>
+      <canvas id="chart-cache" height="120"></canvas>
+    </section>
+    <section class="card">
+      <h2>Top models</h2>
+      <table id="table-models"><thead><tr><th>Model</th><th>Reqs</th><th>In</th><th>Out</th><th>Errors</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section class="card">
+      <h2>Top sessions</h2>
+      <table id="table-sessions"><thead><tr><th>Session</th><th>Reqs</th><th>Tokens</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section class="card">
+      <h2>Errors (last 24h)</h2>
+      <table id="table-errors"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

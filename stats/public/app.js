@@ -1,0 +1,118 @@
+// Stable color per model/session: djb2 hash of the first 8 chars → fixed palette.
+function hashKey(s) {
+  let h = 5381;
+  const str = String(s ?? '');
+  const len = Math.min(str.length, 8);
+  for (let i = 0; i < len; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+  return h;
+}
+const PALETTE = ['#a479e2', '#4a86e8', '#16a766', '#fad165', '#ffad47', '#fb4c2f', '#999999', '#f691b3', '#43d692', '#ff7537', '#7bd3f7', '#b9e4d0'];
+function colorFor(s) { return PALETTE[hashKey(s) % PALETTE.length]; }
+
+const charts = {};
+
+function abbrev(n) {
+  if (n == null) return '—';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return (Math.round(n / 100) / 10) + 'k';
+  return (Math.round(n / 100_000) / 10) + 'M';
+}
+
+async function refresh() {
+  const range = document.getElementById('range').value;
+  let data;
+  try {
+    const res = await fetch(`/api/stats?range=${range}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    data = await res.json();
+  } catch (err) {
+    console.error('fetch failed', err);
+    return;
+  }
+
+  // Today's totals
+  const t = data.todaysTotals ?? {};
+  document.getElementById('totals').innerHTML = `
+    <div><span class="label">Requests</span><span class="value">${abbrev(t.requests)}</span></div>
+    <div><span class="label">Input</span><span class="value">${abbrev(t.input_tokens)}</span></div>
+    <div><span class="label">Output</span><span class="value">${abbrev(t.output_tokens)}</span></div>
+  `;
+
+  // Tokens per day (stacked by model)
+  const dayMap = {};
+  for (const r of data.tokensByDay ?? []) {
+    (dayMap[r.date] ??= {})[r.model] = r.tokens;
+  }
+  const days = Object.keys(dayMap).sort();
+  const models = [...new Set((data.tokensByDay ?? []).map((r) => r.model))].sort();
+  renderStackedBar('chart-tokens', days, models, (day, model) => dayMap[day]?.[model] ?? 0);
+
+  // Requests by hour-of-day
+  renderBars('chart-hours', (data.requestsByHourOfDay ?? []).map((r) => String(r.hour).padStart(2, '0')),
+    (data.requestsByHourOfDay ?? []).map((r) => r.requests));
+
+  // Cache hit rate (percent)
+  renderBars('chart-cache', (data.cacheHitRateByModel ?? []).map((r) => r.model),
+    (data.cacheHitRateByModel ?? []).map((r) => Math.round(r.hitRate * 100)),
+    (data.cacheHitRateByModel ?? []).map((r) => colorFor(r.model)));
+
+  // Top models
+  document.querySelector('#table-models tbody').innerHTML = (data.topModels ?? []).map((r) => `
+    <tr>
+      <td><span class="session-swatch" style="background:${colorFor(r.model)}"></span>${r.model}</td>
+      <td>${abbrev(r.requests)}</td>
+      <td>${abbrev(r.input_tokens)}</td>
+      <td>${abbrev(r.output_tokens)}</td>
+      <td>${r.errors}</td>
+    </tr>
+  `).join('');
+
+  // Top sessions
+  document.querySelector('#table-sessions tbody').innerHTML = (data.topSessions ?? []).map((r) => `
+    <tr>
+      <td><span class="session-swatch" style="background:${colorFor(r.session_id)}"></span>${r.session_id?.slice(0, 8) ?? '—'}</td>
+      <td>${r.requests}</td>
+      <td>${abbrev(r.tokens)}</td>
+    </tr>
+  `).join('');
+
+  // Errors
+  document.querySelector('#table-errors tbody').innerHTML =
+    (data.errorsByStatus ?? []).map((r) => `<tr><td>${r.status}</td><td>${r.count}</td></tr>`).join('')
+    || '<tr><td colspan="2">none</td></tr>';
+}
+
+function renderBars(canvasId, labels, values, colors = '#4a86e8') {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  if (charts[canvasId]) charts[canvasId].destroy();
+  charts[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets: [{ data: values, backgroundColor: colors }] },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } },
+  });
+}
+
+function renderStackedBar(canvasId, labels, series, valueFor) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  if (charts[canvasId]) charts[canvasId].destroy();
+  charts[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: series.map((name) => ({
+        label: name,
+        data: labels.map((d) => valueFor(d, name)),
+        backgroundColor: colorFor(name),
+        stack: 'tokens',
+      })),
+    },
+    options: {
+      plugins: { legend: { display: true } },
+      scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+    },
+  });
+}
+
+document.getElementById('range').addEventListener('change', refresh);
+refresh();
+setInterval(refresh, 10_000);
