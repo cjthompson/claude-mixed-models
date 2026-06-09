@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-06-08
+
+### Tasks
+- add usage-stats service: best-effort JSONL event sink in the router, a batcher that rolls events up into SQLite (5m/1h/1d), a read-only HTTP dashboard, and a terminal CLI (#observability, #stats)
+- vendored chart.js for offline dashboard rendering
+
 ## 2026-06-03
 
 ### Tasks

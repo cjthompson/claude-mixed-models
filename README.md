@@ -14,4 +14,10 @@ Run Claude Code with both Anthropic and MiniMax models via a tiny local router.
 ## Running as a service
 To run the router as a persistent background service (auto-restart on crash, auto-start on login), see [`docs/operations/router-as-service.md`](docs/operations/router-as-service.md).
 
+## Usage stats
+The router emits a JSONL event per request. A separate `com.claude-mixed-models.stats`
+agent (`scripts/server.mjs`) batches those events into a SQLite database and serves
+a self-hosted dashboard at `http://localhost:8789`, plus a terminal view via `npm run stats`.
+See [`docs/operations/stats-services.md`](docs/operations/stats-services.md) for install / restart / state-file details.
+
 See `docs/superpowers/plans/` for the full plan.
