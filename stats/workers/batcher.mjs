@@ -133,12 +133,13 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
 
 // Long-running mode: fs.watch with a 10s safety timer. Re-arms on every flush.
 async function mainLoop() {
-  let stopping = false;
-  process.on('SIGTERM', () => { stopping = true; });
-  process.on('SIGINT',  () => { stopping = true; });
+  // runOnce() is synchronous and transactional, so a signal can only be
+  // delivered between ticks (never mid-commit). Exit promptly so the
+  // orchestrator's graceful shutdown doesn't have to wait for the 10s timer.
+  process.on('SIGTERM', () => process.exit(0));
+  process.on('SIGINT',  () => process.exit(0));
 
   const tick = async () => {
-    if (stopping) process.exit(0);
     try {
       await runOnce();
     } catch (err) {
