@@ -90,6 +90,12 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
     done = true;
     logRes(id, fields);
   };
+  // TEMPORARY HEADER DIAGNOSTIC
+  const cacheHeaders = Object.fromEntries(
+    Object.entries(headers).filter(([k]) => k.toLowerCase().includes('cache') || k.toLowerCase().includes('beta') || k.toLowerCase() === 'anthropic-version')
+  );
+  console.error(`[hdr-req] id=${id} cache/beta headers: ${JSON.stringify(cacheHeaders)}`);
+
   const upstreamReq = https.request(
     {
       protocol: conn.url.protocol,
@@ -100,6 +106,11 @@ export function forward(req, res, conn, outBody, { id, t0, session }) {
       headers,
     },
     (upstreamRes) => {
+      // TEMPORARY HEADER DIAGNOSTIC
+      const resCacheHeaders = Object.fromEntries(
+        Object.entries(upstreamRes.headers).filter(([k]) => k.toLowerCase().includes('cache') || k.toLowerCase().includes('beta') || k.toLowerCase().includes('x-ratelimit') || k.toLowerCase().includes('anthropic'))
+      );
+      console.error(`[hdr-res] id=${id} status=${upstreamRes.statusCode} cache/beta headers: ${JSON.stringify(resCacheHeaders)}`);
       // Track the upstream status so the client-disconnect path can log it.
       const upstreamStatus = upstreamRes.statusCode ?? 502;
       const safeHeaders = { ...upstreamRes.headers };

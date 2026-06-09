@@ -4,7 +4,7 @@ import { extractUsageFromSse, hasCacheControl } from '../lib/sse.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
-const UPSTREAM = new URL(process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/anthropic');
+const UPSTREAM = new URL(process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/');
 const KEY = process.env.MINIMAX_API_KEY;
 
 if (!KEY) {
