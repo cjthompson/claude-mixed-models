@@ -16,9 +16,12 @@ function rangeThreshold(range) {
   return now.toISOString();
 }
 
-function withRange(range, whereClause = '1=1') {
+// `tsCol` is the time column to filter on: 'ts' for the raw events table,
+// 'bucket_start' for the rollup tables (both store ISO-8601 UTC strings, so a
+// lexicographic `>=` comparison against the threshold is correct).
+function withRange(range, whereClause = '1=1', tsCol = 'ts') {
   const t = rangeThreshold(range);
-  return t ? `${whereClause} AND ts >= ?` : whereClause;
+  return t ? `${whereClause} AND ${tsCol} >= ?` : whereClause;
 }
 
 function bindRange(range, ...rest) {
@@ -40,7 +43,7 @@ export function tokensByDay(db, range = '30d') {
   return db.prepare(`
     SELECT substr(bucket_start, 1, 10) AS date, model, SUM(input_tokens + output_tokens) AS tokens
     FROM rollup_1h
-    WHERE ${withRange(range, '1=1')}
+    WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY date, model
     ORDER BY date, model
   `).all(...bindRange(range));
@@ -51,7 +54,7 @@ export function requestsByHourOfDay(db, range = '7d') {
   const rows = db.prepare(`
     SELECT strftime('%H', bucket_start) AS hour, SUM(requests) AS requests
     FROM rollup_1h
-    WHERE ${withRange(range, '1=1')}
+    WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY hour
   `).all(...bindRange(range));
   // Fill missing hours with 0 so the chart has 24 bars.
@@ -67,7 +70,7 @@ export function cacheHitRateByModel(db, range = '7d') {
                 THEN CAST(SUM(cache_read) AS REAL) / SUM(input_tokens + cache_read + cache_write)
                 ELSE 0 END AS hitRate
     FROM rollup_1h
-    WHERE ${withRange(range, '1=1')}
+    WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY model
     ORDER BY hitRate DESC
   `).all(...bindRange(range));
@@ -81,7 +84,7 @@ export function topModels(db, range = '7d', limit = 5) {
            SUM(output_tokens) AS output_tokens,
            SUM(errors) AS errors
     FROM rollup_1h
-    WHERE ${withRange(range, '1=1')}
+    WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY model
     ORDER BY input_tokens DESC
     LIMIT ?

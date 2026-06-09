@@ -114,6 +114,18 @@ test('errorsByStatus: returns counts of status >= 400 in the last 24h', () => {
   assert.deepEqual(rows, []);
 });
 
+test('ranged rollup queries filter on bucket_start (not ts) without error', () => {
+  // Regression: rollup tables have no `ts` column. A ranged query must filter on
+  // `bucket_start`. This throws "no such column: ts" if that regresses, regardless
+  // of whether any rows fall inside the window — so it stays valid as dates advance.
+  const db = freshDb();
+  buildRollups(db);
+  assert.doesNotThrow(() => tokensByDay(db, '7d'));
+  assert.doesNotThrow(() => requestsByHourOfDay(db, '30d'));
+  assert.doesNotThrow(() => cacheHitRateByModel(db, '30d'));
+  assert.doesNotThrow(() => topModels(db, '30d'));
+});
+
 test('todaysTotals: returns an object with numeric keys', () => {
   // Seed data is in early June 2026; "today" in a future test run will be different.
   // We just assert the function runs and returns a single object with the expected keys.
