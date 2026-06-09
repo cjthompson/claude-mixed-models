@@ -7,6 +7,10 @@
     "test": "node --test --test-force-exit",
     "proxy": "node --env-file-if-exists=.env proxy/server.js",
     "router": "node --env-file-if-exists=.env router/server.js",
-    "install-service": "scripts/install-router-service.sh"
+    "stats": "node bin/stats-cli.mjs",
+    "install-services": "scripts/install-services.sh"
+  },
+  "engines": {
+    "node": ">=22.5"
   }
 }
