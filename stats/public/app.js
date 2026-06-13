@@ -34,7 +34,7 @@ async function refresh() {
   const t = data.todaysTotals ?? {};
   document.getElementById('totals').innerHTML = `
     <div><span class="label">Requests</span><span class="value">${abbrev(t.requests)}</span></div>
-    <div><span class="label">Input</span><span class="value">${abbrev(t.input_tokens)}</span></div>
+    <div><span class="label">Context</span><span class="value">${abbrev(t.input_tokens + (t.cache_read ?? 0) + (t.cache_write ?? 0))}</span></div>
     <div><span class="label">Output</span><span class="value">${abbrev(t.output_tokens)}</span></div>
   `;
 
@@ -61,7 +61,7 @@ async function refresh() {
     <tr>
       <td><span class="session-swatch" style="background:${colorFor(r.model)}"></span>${r.model}</td>
       <td>${abbrev(r.requests)}</td>
-      <td>${abbrev(r.input_tokens)}</td>
+      <td>${abbrev(r.input_tokens + (r.cache_read ?? 0) + (r.cache_write ?? 0))}</td>
       <td>${abbrev(r.output_tokens)}</td>
       <td>${r.errors}</td>
     </tr>

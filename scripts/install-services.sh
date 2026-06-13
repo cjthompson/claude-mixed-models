@@ -1,9 +1,10 @@
 #!/bin/bash
 set -e
 
-# Installs (or uninstalls) the launchd services for this project:
-#   com.claude-mixed-models.router  -> router/server.js
-#   com.claude-mixed-models.stats   -> scripts/server.mjs (stats orchestrator)
+# Installs (or uninstalls) the single launchd service for this project:
+#   com.claude-mixed-models.stats  -> scripts/server.mjs (orchestrator
+#                                    that supervises the router, the stats
+#                                    batcher, and the stats HTTP server)
 
 # Determine the project root (parent of the scripts directory)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,9 +17,10 @@ if [ -z "$NODE_PATH" ]; then
   exit 1
 fi
 
-# Services to manage, by launchd label. Each has a matching <label>.plist template.
+# Services to manage, by launchd label. Each has a matching <label>.plist
+# template. There is only one service: the orchestrator supervises the
+# router and the two stats workers as child processes.
 SERVICES=(
-  "com.claude-mixed-models.router"
   "com.claude-mixed-models.stats"
 )
 
@@ -52,19 +54,17 @@ for label in "${SERVICES[@]}"; do
 done
 
 echo ""
-echo "Services installed and started."
+echo "Service installed and started."
 echo ""
 echo "Status:"
-echo "  launchctl print gui/\$(id -u)/com.claude-mixed-models.router"
 echo "  launchctl print gui/\$(id -u)/com.claude-mixed-models.stats"
 echo ""
-echo "Logs:"
-echo "  tail -f $PROJECT_DIR/router.log $PROJECT_DIR/router.err.log"
+echo "Logs (orchestrator + all three supervised children, interleaved):"
 echo "  tail -f $PROJECT_DIR/stats/server.log $PROJECT_DIR/stats/server.err.log"
 echo ""
-echo "Stop / start a service (e.g. stats):"
+echo "Stop / start the service:"
 echo "  launchctl stop  gui/\$(id -u)/com.claude-mixed-models.stats"
 echo "  launchctl start gui/\$(id -u)/com.claude-mixed-models.stats"
 echo ""
-echo "Uninstall both:"
+echo "Uninstall:"
 echo "  scripts/install-services.sh uninstall"

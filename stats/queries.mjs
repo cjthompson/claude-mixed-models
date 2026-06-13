@@ -82,11 +82,13 @@ export function topModels(db, range = '7d', limit = 5) {
            SUM(requests) AS requests,
            SUM(input_tokens) AS input_tokens,
            SUM(output_tokens) AS output_tokens,
-           SUM(errors) AS errors
+           SUM(errors) AS errors,
+           SUM(cache_read) AS cache_read,
+           SUM(cache_write) AS cache_write
     FROM rollup_1h
     WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY model
-    ORDER BY input_tokens DESC
+    ORDER BY input_tokens + cache_read + cache_write DESC
     LIMIT ?
   `).all(...bindRange(range), limit);
 }
@@ -122,8 +124,10 @@ export function todaysTotals(db) {
     SELECT
       COALESCE(SUM(requests), 0)      AS requests,
       COALESCE(SUM(input_tokens), 0)  AS input_tokens,
-      COALESCE(SUM(output_tokens), 0) AS output_tokens
+      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+      COALESCE(SUM(cache_read), 0)    AS cache_read,
+      COALESCE(SUM(cache_write), 0)   AS cache_write
     FROM rollup_1d
     WHERE bucket_start = ?
-  `).get(today) ?? { requests: 0, input_tokens: 0, output_tokens: 0 };
+  `).get(today) ?? { requests: 0, input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0 };
 }
