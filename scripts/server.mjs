@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createBackoff } from './server.backoff.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = join(here, '..');
@@ -23,6 +24,11 @@ const SCRIPTS = [
 
 const procs = new Map();
 let shuttingDown = false;
+// Respawn discipline: exponential backoff (1, 2, 4, 8, 16, 30 s) capped, and
+// give up after 10 consecutive fast crashes so a permanent failure (EADDRINUSE,
+// missing env var, bad config) doesn't fill stats/server.err.log with 30 lines
+// of stack trace per second forever. See scripts/server.backoff.mjs.
+const backoff = createBackoff();
 
 function start(script) {
   // Use process.execPath (the absolute path of the Node binary running
@@ -32,10 +38,20 @@ function start(script) {
   // every launch context (shell, launchd, test harness).
   const child = spawn(process.execPath, [script], { stdio: 'inherit' });
   procs.set(script, child);
+  backoff.onStart(script);
   child.on('exit', (code, signal) => {
     if (shuttingDown) return;        // expected during graceful stop
-    console.error(`[stats] ${script} exited (code=${code} signal=${signal}); respawning in 1s`);
-    setTimeout(() => start(script), 1000);
+    const action = backoff.onExit(script, { code, signal });
+    if (action.action === 'respawn') {
+      setTimeout(() => { if (!shuttingDown) start(script); }, action.delayMs);
+    } else if (action.action === 'give-up') {
+      // Don't race with a SIGTERM that's already in flight — the shutdown
+      // handler will exit 0 cleanly via the existing promise.
+      if (shuttingDown) return;
+      process.exit(action.exitCode);
+    }
+    // 'noop' (healthy exit) needs no scheduling: the counter was already
+    // reset inside onExit and the next start() reuses the same procs slot.
   });
 }
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-06-11
+
+### Fixes
+- fix `spawn node ENOENT` in the orchestrator by spawning children with `process.execPath` (the absolute path of the Node binary) instead of the bare string `'node'` — launchd's `KeepAlive` services don't inherit the user's `PATH`, so a bare `'node'` could not be resolved in the child process
+
+### Tasks
+- consolidate router + stats into a single launchd service: `scripts/server.mjs` now supervises the router, the batcher, and the HTTP dashboard as three children; the `com.claude-mixed-models.router` plist and `install-router-service.sh` script are removed; `install-services.sh` installs only the single `com.claude-mixed-models.stats` agent
+- update `docs/operations/{router-as-service,stats-services}.md` and the README to describe the single-service architecture and the new interleaved log locations (`stats/server.log` / `stats/server.err.log`)
+
 ## 2026-06-08
 
 ### Tasks

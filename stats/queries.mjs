@@ -84,7 +84,10 @@ export function topModels(db, range = '7d', limit = 5) {
            SUM(output_tokens) AS output_tokens,
            SUM(errors) AS errors,
            SUM(cache_read) AS cache_read,
-           SUM(cache_write) AS cache_write
+           SUM(cache_write) AS cache_write,
+           SUM(cache_5m) AS cache_5m,
+           SUM(cache_1h) AS cache_1h,
+           SUM(thinking) AS thinking
     FROM rollup_1h
     WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY model
@@ -108,6 +111,20 @@ export function topSessions(db, range = '7d', limit = 5) {
   `).all(...bindRange(range), limit);
 }
 
+// Thinking tokens per model, ranked desc. Models with no thinking
+// activity (Haiku, non-thinking Sonnet turns) are excluded so the
+// dashboard can show "Opus did the thinking" without zero rows
+// cluttering the card.
+export function thinkingByModel(db, range = '7d') {
+  return db.prepare(`
+    SELECT model, SUM(thinking) AS thinking
+    FROM rollup_1h
+    WHERE ${withRange(range, 'thinking > 0', 'bucket_start')}
+    GROUP BY model
+    ORDER BY thinking DESC
+  `).all(...bindRange(range));
+}
+
 export function errorsByStatus(db, range = '24h') {
   return db.prepare(`
     SELECT status, COUNT(*) AS count
@@ -126,8 +143,9 @@ export function todaysTotals(db) {
       COALESCE(SUM(input_tokens), 0)  AS input_tokens,
       COALESCE(SUM(output_tokens), 0) AS output_tokens,
       COALESCE(SUM(cache_read), 0)    AS cache_read,
-      COALESCE(SUM(cache_write), 0)   AS cache_write
+      COALESCE(SUM(cache_write), 0)   AS cache_write,
+      COALESCE(SUM(thinking), 0)      AS thinking
     FROM rollup_1d
     WHERE bucket_start = ?
-  `).get(today) ?? { requests: 0, input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0 };
+  `).get(today) ?? { requests: 0, input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, thinking: 0 };
 }

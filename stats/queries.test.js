@@ -12,6 +12,7 @@ import {
   topSessions,
   errorsByStatus,
   todaysTotals,
+  thinkingByModel,
 } from './queries.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -23,16 +24,17 @@ function freshDb() {
   // Seed: 2 days, 2 models, mix of statuses and tokens.
   const insert = db.prepare(`
     INSERT INTO events (id, ts, model, real_model, upstream, status, duration_ms, session_id,
-                       input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                       cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   // Day 1: 2026-06-07
-  insert.run('a1', '2026-06-07T10:00:00.000Z', 'minimax',     'MiniMax-M3',  'api.minimax.io',    200, 1000, 's1', 100, 10, 0, 0);
-  insert.run('a2', '2026-06-07T11:00:00.000Z', 'minimax',     'MiniMax-M3',  'api.minimax.io',    200, 2000, 's1', 200, 20, 0, 0);
-  insert.run('a3', '2026-06-07T12:00:00.000Z', 'claude-opus', 'claude-opus', 'api.anthropic.com', 502,  500, 's1',   0,  0, 0, 0);
+  insert.run('a1', '2026-06-07T10:00:00.000Z', 'minimax',     'MiniMax-M3',  'api.minimax.io',    200, 1000, 's1', 100, 10, 0, 0,    0, 0, 0);
+  insert.run('a2', '2026-06-07T11:00:00.000Z', 'minimax',     'MiniMax-M3',  'api.minimax.io',    200, 2000, 's1', 200, 20, 0, 0,    0, 0, 0);
+  insert.run('a3', '2026-06-07T12:00:00.000Z', 'claude-opus', 'claude-opus', 'api.anthropic.com', 502,  500, 's1',   0,  0, 0, 0,    0, 0, 83);
   // Day 2: 2026-06-08
-  insert.run('b1', '2026-06-08T10:00:00.000Z', 'minimax',     'MiniMax-M3',  'api.minimax.io',    200, 1500, 's2', 300, 30, 50, 0);
-  insert.run('b2', '2026-06-08T11:00:00.000Z', 'claude-opus', 'claude-opus', 'api.anthropic.com', 200, 2500, 's2', 400, 40, 0, 0);
+  insert.run('b1', '2026-06-08T10:00:00.000Z', 'minimax',     'MiniMax-M3',  'api.minimax.io',    200, 1500, 's2', 300, 30, 50, 0,   0, 0, 0);
+  insert.run('b2', '2026-06-08T11:00:00.000Z', 'claude-opus', 'claude-opus', 'api.anthropic.com', 200, 2500, 's2', 400, 40, 0, 0,    0, 0, 0);
   return db;
 }
 
@@ -45,11 +47,13 @@ function buildRollups(db) {
     ['rollup_5m', "substr(ts,1,13) || ':00:00.000Z'"],
   ]) {
     db.exec(`
-      INSERT INTO ${tbl} (bucket_start, model, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, p50_ms, p95_ms)
+      INSERT INTO ${tbl} (bucket_start, model, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, cache_5m, cache_1h, thinking, p50_ms, p95_ms)
       SELECT ${keyExpr} AS bucket_start, model, upstream,
              COUNT(*), SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
              SUM(input_tokens), SUM(output_tokens),
              SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
+             SUM(cache_5m_input_tokens), SUM(cache_1h_input_tokens),
+             SUM(thinking_tokens),
              NULL, NULL
       FROM events
       GROUP BY bucket_start, model, upstream
@@ -134,4 +138,35 @@ test('todaysTotals: returns an object with numeric keys', () => {
   const row = todaysTotals(db);
   assert.equal(typeof row.requests, 'number');
   assert.equal(typeof row.input_tokens, 'number');
+  // The thinking field was added with the normalizeUsage refactor;
+  // todaysTotals must include it in the returned object even when the
+  // value is 0 (the empty-day case).
+  assert.equal(typeof row.thinking, 'number');
+});
+
+test('thinkingByModel: returns only models with nonzero thinking, ranked desc', () => {
+  // Seed: only claude-opus on day 1 has thinking (83). All other rows
+  // are 0. The 'all' range covers both seeded days.
+  const db = freshDb();
+  buildRollups(db);
+  const rows = thinkingByModel(db, 'all');
+  assert.equal(rows.length, 1, 'only claude-opus has thinking tokens in the seed');
+  assert.equal(rows[0].model, 'claude-opus');
+  assert.equal(rows[0].thinking, 83);
+});
+
+test('topModels: includes cache_5m, cache_1h, and thinking sums', () => {
+  const db = freshDb();
+  buildRollups(db);
+  const rows = topModels(db, 'all');
+  // minimax: cache_5m=0+0+0+0=0, cache_1h=0, thinking=0 (no thinking ever)
+  const minimax = rows.find((r) => r.model === 'minimax');
+  assert.equal(minimax.cache_5m, 0);
+  assert.equal(minimax.cache_1h, 0);
+  assert.equal(minimax.thinking, 0);
+  // claude-opus: cache_5m=0+0=0, cache_1h=0+0=0, thinking=83+0=83
+  const opus = rows.find((r) => r.model === 'claude-opus');
+  assert.equal(opus.cache_5m, 0);
+  assert.equal(opus.cache_1h, 0);
+  assert.equal(opus.thinking, 83);
 });

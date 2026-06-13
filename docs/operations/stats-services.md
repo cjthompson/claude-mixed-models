@@ -1,34 +1,42 @@
 # Usage-stats service
 
-The stats service is a separate launchd agent (`com.claude-mixed-models.stats`)
-that runs `scripts/server.mjs`, which supervises two child processes: the batcher
-and the HTTP server. Install it alongside the router agent:
+The stats subsystem (batcher + dashboard HTTP server) is part of the single
+orchestration launchd agent (`com.claude-mixed-models.stats`). The agent
+runs `scripts/server.mjs`, which supervises three child processes: the
+router, the batcher, and the dashboard HTTP server. Install it with:
 
 ```bash
 scripts/install-services.sh
 ```
 
-This installs (or, with `scripts/install-services.sh uninstall`, removes) both the
-`router` and `stats` agents. The stats agent writes logs to `stats/server.log`
-and `stats/server.err.log`; tail either file to see what the orchestrator and its
-children are doing.
+This installs (or, with `scripts/install-services.sh uninstall`, removes) the
+single `stats` agent. It writes logs to `stats/server.log`
+and `stats/server.err.log`; tail either file to see what the orchestrator
+and its children are doing. The router's REQ/RES lines interleave with the
+stats workers' output in the same log files.
 
 ## Architecture
 
 ```
-router/server.js ──append──> router.events.jsonl ──watch──> batcher.mjs ──> router.stats.db
-                                                                                   │
-                                                                          server.mjs (read-only WAL)
-                                                                                   │
-                                                                   http://127.0.0.1:8789  +  npm run stats
+orchestrator (scripts/server.mjs)
+  ├── router/server.js
+  │     │
+  │     └─append──> router.events.jsonl
+  │
+  ├── stats/workers/batcher.mjs
+  │     └─watch──> router.stats.db (writes)
+  │
+  └── stats/workers/server.mjs
+        └─read-only WAL──> http://127.0.0.1:8789  +  npm run stats
 ```
 
-The router appends one JSON line per request to the events buffer (best-effort —
-a failed append never breaks the response path). The batcher consumes the buffer
-on every `fs.watch` change (plus a 10s safety timer), inserts into the `events`
-table, recomputes the 5m/1h/1d rollups, and truncates the buffer. Re-processing is
-safe: `INSERT OR IGNORE` on `(id, ts)` dedupes and rollups are recomputed from
-`events`, never incremented.
+The router appends one JSON line per request to the events buffer
+(best-effort — a failed append never breaks the response path). The batcher
+consumes the buffer on every `fs.watch` change (plus a 10s safety timer),
+inserts into the `events` table, recomputes the 5m/1h/1d rollups, and
+truncates the buffer. Re-processing is safe: `INSERT OR IGNORE` on
+`(id, ts)` dedupes and rollups are recomputed from `events`, never
+incremented.
 
 ## Endpoints
 
@@ -62,8 +70,9 @@ launchctl stop  gui/$(id -u)/com.claude-mixed-models.stats
 launchctl start gui/$(id -u)/com.claude-mixed-models.stats
 ```
 
-The router agent (`com.claude-mixed-models.router`) is independent and is not
-affected by a stats restart.
+This restarts the orchestrator, which in turn restarts the router, the
+batcher, and the HTTP dashboard server. There is no separate router agent —
+it's supervised by the same `stats` agent.
 
 ## Requirements
 

@@ -32,10 +32,17 @@ async function refresh() {
 
   // Today's totals
   const t = data.todaysTotals ?? {};
+  // Show the thinking line only when the day had any — most days on a
+  // Haiku/Sonnet-only workload will be 0, and "Thinking 0" would just
+  // be visual noise.
+  const thinkingLine = t.thinking > 0
+    ? `<div><span class="label">Thinking</span><span class="value">${abbrev(t.thinking)}</span></div>`
+    : '';
   document.getElementById('totals').innerHTML = `
     <div><span class="label">Requests</span><span class="value">${abbrev(t.requests)}</span></div>
     <div><span class="label">Context</span><span class="value">${abbrev(t.input_tokens + (t.cache_read ?? 0) + (t.cache_write ?? 0))}</span></div>
     <div><span class="label">Output</span><span class="value">${abbrev(t.output_tokens)}</span></div>
+    ${thinkingLine}
   `;
 
   // Tokens per day (stacked by model)
@@ -63,6 +70,7 @@ async function refresh() {
       <td>${abbrev(r.requests)}</td>
       <td>${abbrev(r.input_tokens + (r.cache_read ?? 0) + (r.cache_write ?? 0))}</td>
       <td>${abbrev(r.output_tokens)}</td>
+      <td>${abbrev(r.thinking ?? 0)}</td>
       <td>${r.errors}</td>
     </tr>
   `).join('');

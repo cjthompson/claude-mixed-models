@@ -3,31 +3,24 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
 import http from 'node:http';
-import https from 'node:https';
 import net from 'node:net';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  applyAuth, applyToolCompat, forward, handleRequest,
+  installShutdown, KNOWN_AUTH_MODES,
+} from './server.js';
+import { createFakeUpstream, makeObservableReqRes, SAMPLE_SSE } from '../test-helpers/fake-upstream.mjs';
 
-// Importing server.js has the side effect of binding ROUTER_PORT (default
-// 8788) via the createServer() at the bottom of the module. ESM imports
-// are hoisted, so we can't set process.env before they evaluate — the
-// env must be in place *before* the import statement runs. The clean way
-// to do that is a dynamic import inside a before() hook. The other env
-// vars the tests need (MINIMAX_API_KEY placeholder so upstreamConn()
-// doesn't throw, ROUTER_PORT=0 so listen() picks an ephemeral port) are
-// set here too.
+// server.js's bottom-of-file `listen()` is gated on an entry-point check,
+// so importing it here does NOT start a real listening server — node --test
+// can exit as soon as the assertions finish. We still set MINIMAX_API_KEY
+// as a placeholder so `upstreamConn('minimax')` inside handleRequest doesn't
+// throw on the mapped-route test. We trust the self-signed upstream cert
+// only inside this process.
 process.env.MINIMAX_API_KEY ||= 'test-key-not-used';
-process.env.ROUTER_PORT ||= '0';
-// The new forward() tests below stand up a self-signed HTTPS upstream and
-// point the router at it. We trust that cert only inside the test process.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED ||= '0';
-
-let applyAuth, forward, handleRequest, KNOWN_AUTH_MODES, applyToolCompat, installShutdown;
-before(async () => {
-  ({ applyAuth, forward, handleRequest, KNOWN_AUTH_MODES, applyToolCompat, installShutdown } = await import('./server.js'));
-});
 
 // Hermetic STATS_EVENTS_FILE: every test gets its own tmpdir so the new
 // logEvent call inside finalize() doesn't write to /tmp. Cleared in afterEach
@@ -159,25 +152,9 @@ test('body-guard: plain objects ARE routeable', () => {
 // have thrown synchronously at ClientRequest construction, before the error
 // handler could run, so the client would see no writeHead at all.
 
-function makeReqRes() {
-  const req = new EventEmitter();
-  req.method = 'POST';
-  req.url = '/v1/messages';
-  req.headers = { host: 'router' };
-
-  let statusCode = null;
-  let body = '';
-  const res = new Writable({
-    write(chunk, _enc, cb) { body += chunk.toString(); cb(); },
-  });
-  res.writeHead = (s) => { statusCode = s; return res; };
-  res.headersSent = false;
-  return { req, res, getStatus: () => statusCode, getBody: () => body };
-}
-
 test('forward: https:// upstream reaches the error handler (regression: ERR_INVALID_PROTOCOL)', async () => {
   const conn = { url: new URL('https://127.0.0.1:1'), key: null, auth: 'passthrough' };
-  const { req, res, getStatus, getBody } = makeReqRes();
+  const { req, res, getStatus, getBody } = makeObservableReqRes();
 
   // Capture logRes output so we can assert the RES line was emitted for
   // the 502 path. Suppress console.log for the test's duration.
@@ -337,104 +314,34 @@ test('handleRequest: REQ line for a bodyless GET omits model', async () => {
 // and point the router at it. The cert is generated once per test run in
 // before(); the cert directory is removed in after().
 
-// Generate a self-signed cert for 127.0.0.1. OpenSSL is available on every
-// dev machine we care about; if it isn't, the test run will fail with a
-// clear spawn error rather than a confusing TLS handshake.
-let fakeUpstream = null;   // { server, port }
-let certDir = null;
+// One long-lived HTTPS upstream shared across the SSE-suite tests; each
+// test installs a fresh request handler via `upstream.respond = fn`. The
+// cert, the listen(), and the cleanup live in test-helpers/fake-upstream.mjs.
+const upstream = createFakeUpstream();
 let fakeServerCounter = 0; // unique baseUrl per test so req.url paths line up
 
 before(async () => {
-  // Wait for the dynamic import in the earlier before() to finish so we
-  // have `forward` available. (node:test runs before hooks sequentially.)
-  certDir = mkdtempSync(join(tmpdir(), 'router-test-cert-'));
-  const keyPath = join(certDir, 'key.pem');
-  const certPath = join(certDir, 'cert.pem');
-  execFileSync('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048',
-    '-keyout', keyPath, '-out', certPath,
-    '-days', '1', '-nodes',
-    '-subj', '/CN=127.0.0.1',
-    '-addext', 'subjectAltName=IP:127.0.0.1',
-  ]);
-  // Stand up one long-lived HTTPS server; each test installs a fresh
-  // request handler via fakeUpstream.respond = (req, res) => ... so the
-  // routes/responses are scoped to the test that set them.
-  fakeUpstream = {
-    server: https.createServer(
-      { key: readFileSync(keyPath), cert: readFileSync(certPath) },
-      (req, res) => {
-        if (fakeUpstream.respond) {
-          fakeUpstream.respond(req, res);
-        } else {
-          res.writeHead(500);
-          res.end('no test handler installed');
-        }
-      }
-    ),
-  };
-  await new Promise((resolve) => fakeUpstream.server.listen(0, '127.0.0.1', resolve));
-  fakeUpstream.port = fakeUpstream.server.address().port;
+  await upstream.start();
 });
 
 after(async () => {
-  if (fakeUpstream) {
-    await new Promise((resolve) => fakeUpstream.server.close(resolve));
-  }
-  if (certDir) {
-    rmSync(certDir, { recursive: true, force: true });
-  }
+  await upstream.stop();
 });
 
-// Build a req/res pair that observes status and body, but lets the test
-// simulate a client-side disconnect by calling res.destroy().
-function makeObservableReqRes() {
-  const req = new EventEmitter();
-  req.method = 'POST';
-  req.url = `/v1/messages-${++fakeServerCounter}`;   // unique per test
-  req.headers = { host: 'router' };
-  let statusCode = null;
-  let body = '';
-  const res = new Writable({
-    write(chunk, _enc, cb) { body += chunk.toString(); cb(); },
-  });
-  res.writeHead = (s) => { statusCode = s; return res; };
-  res.headersSent = false;
-  res.destroyed = false;
-  // Real http.ServerResponse implements destroy() to abort the connection.
-  // The Writable in our test harness never fires 'close' on its own, so we
-  // emit it explicitly when destroy() is called.
-  res.destroy = function () {
-    if (res.destroyed) return;
-    res.destroyed = true;
-    res.emit('close');
-  };
-  return { req, res, getStatus: () => statusCode, getBody: () => body };
+// Per-test observable req/res. The unique url avoids any cross-test
+// interference in the path-keyed log lines.
+function makeReqResForForward() {
+  return makeObservableReqRes({ url: `/v1/messages-${++fakeServerCounter}` });
 }
 
-const SAMPLE_SSE = [
-  'event: message_start',
-  'data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":1234,"cache_read_input_tokens":0}}}',
-  '',
-  'event: content_block_delta',
-  'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}',
-  '',
-  'event: message_delta',
-  'data: {"type":"message_delta","usage":{"input_tokens":10,"output_tokens":42,"cache_creation_input_tokens":1234,"cache_read_input_tokens":0,"total_tokens":52}}',
-  '',
-  'event: message_stop',
-  'data: {"type":"message_stop"}',
-  '',
-].join('\n');
-
 test('forward: SSE stream — extracts usage from message_delta and emits a token bracket on the RES line', async () => {
-  const conn = { url: new URL(`https://127.0.0.1:${fakeUpstream.port}`), key: null, auth: 'passthrough' };
-  fakeUpstream.respond = (_req, res) => {
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end(SAMPLE_SSE);
   };
 
-  const { req, res, getStatus, getBody } = makeObservableReqRes();
+  const { req, res, getStatus, getBody } = makeReqResForForward();
   const captured = [];
   const origLog = console.log;
   console.log = (line) => captured.push(line);
@@ -465,17 +372,17 @@ test('forward: SSE stream — extracts usage from message_delta and emits a toke
 });
 
 test('forward: non-SSE JSON body — falls back to JSON.parse(text).usage', async () => {
-  const conn = { url: new URL(`https://127.0.0.1:${fakeUpstream.port}`), key: null, auth: 'passthrough' };
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
   const jsonBody = JSON.stringify({
     id: 'msg_01', type: 'message', role: 'assistant', content: [],
     usage: { input_tokens: 100, output_tokens: 9, total_tokens: 109 },
   });
-  fakeUpstream.respond = (_req, res) => {
+  upstream.respond = (_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(jsonBody);
   };
 
-  const { req, res } = makeObservableReqRes();
+  const { req, res } = makeReqResForForward();
   const captured = [];
   const origLog = console.log;
   console.log = (line) => captured.push(line);
@@ -493,19 +400,21 @@ test('forward: non-SSE JSON body — falls back to JSON.parse(text).usage', asyn
   const resLine = captured.find((l) => /^\[\d{2}:\d{2}:\d{2} RES json-test\]/.test(l));
   assert.ok(resLine, `expected a RES line, got: ${JSON.stringify(captured)}`);
   const stripped = resLine.replace(/\x1b\[[0-9;]*m/g, '');
-  assert.match(stripped, /\[in: 100 \| out: 9\]/);
+  // After normalizeUsage the cache_* and thinking fields are always
+  // present (defaulting to 0), so the bracket includes them.
+  assert.match(stripped, /\[in: 100 \| out: 9 \| cache read: 0 \| write: 0\]/);
   assert.match(stripped, /total: 109/);
 });
 
 test('forward: no usage in response — RES line omits the token bracket, no crash', async () => {
-  const conn = { url: new URL(`https://127.0.0.1:${fakeUpstream.port}`), key: null, auth: 'passthrough' };
-  fakeUpstream.respond = (_req, res) => {
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     // ping event with no usage anywhere.
     res.end('event: ping\ndata: {}\n\n');
   };
 
-  const { req, res } = makeObservableReqRes();
+  const { req, res } = makeReqResForForward();
   const captured = [];
   const origLog = console.log;
   console.log = (line) => captured.push(line);
@@ -530,14 +439,14 @@ test('forward: no usage in response — RES line omits the token bracket, no cra
 });
 
 test('forward: client disconnects mid-stream — synthetic 499 RES line fires and upstream is destroyed', async () => {
-  const conn = { url: new URL(`https://127.0.0.1:${fakeUpstream.port}`), key: null, auth: 'passthrough' };
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
   // The handler writes the message_start event, then a slow trickle, then
   // never ends on its own — only the destroy() in the test will close the
   // response. We capture only the upstream *request* close (which fires
   // when the router calls upstreamReq.destroy()); the server-side response
   // close isn't observed because nothing in this test asserts on it.
   let reqDestroyed = false;
-  fakeUpstream.respond = (req, res) => {
+  upstream.respond = (req, res) => {
     req.on('close', () => { reqDestroyed = true; });
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1}}}\n\n');
@@ -545,7 +454,7 @@ test('forward: client disconnects mid-stream — synthetic 499 RES line fires an
     // router's res.on('close') path, which should call upstreamReq.destroy().
   };
 
-  const { req, res } = makeObservableReqRes();
+  const { req, res } = makeReqResForForward();
   const captured = [];
   const origLog = console.log;
   console.log = (line) => captured.push(line);
@@ -575,13 +484,13 @@ test('forward: client disconnects mid-stream — synthetic 499 RES line fires an
 });
 
 test('forward: empty-body HTTP 200 — converts to 502 with error JSON and logs console.error', async () => {
-  const conn = { url: new URL(`https://127.0.0.1:${fakeUpstream.port}`), key: null, auth: 'passthrough' };
-  fakeUpstream.respond = (_req, res) => {
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end();
   };
 
-  const { req, res, getStatus, getBody } = makeObservableReqRes();
+  const { req, res, getStatus, getBody } = makeReqResForForward();
   const logCaptured = [];
   const errCaptured = [];
   const origLog = console.log;
@@ -768,9 +677,9 @@ test('installShutdown: second SIGTERM during drain — destroys remaining socket
 test('handleRequest: writes a JSONL event line on successful completion', async () => {
   // For this test we DO need a real upstream so the request reaches a
   // normal-end finalize (status=200) — otherwise we can only assert a 502
-  // event. Reuse fakeUpstream from the SSE suite.
-  const conn = { url: new URL(`https://127.0.0.1:${fakeUpstream.port}`), key: null, auth: 'passthrough' };
-  fakeUpstream.respond = (_req, res) => {
+  // event. Reuse upstream from the SSE suite.
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end(SAMPLE_SSE);
   };
@@ -779,7 +688,7 @@ test('handleRequest: writes a JSONL event line on successful completion', async 
   // test env has no MINIMAX_API_KEY bound to that upstream name) by going
   // through forward() directly. This still exercises finalize()'s new
   // logEvent call, which is what the assertion targets.
-  const { req, res } = makeObservableReqRes();
+  const { req, res } = makeReqResForForward();
   forward(req, res, conn, Buffer.from('{"model":"minimax"}'), {
     id: 'event-test',
     t0: Date.now() - 5,

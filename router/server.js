@@ -7,8 +7,10 @@ import { dirname, join } from 'node:path';
 import { resolveRoute } from './routes.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 import { extractUsageFromSse } from '../lib/sse.js';
+import { normalizeUsage } from '../lib/usage.js';
 import { logEvent } from '../lib/event.js';
 import { createSampler } from './instrumentation.js';
+import { pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const configPath = process.env.ROUTES_CONFIG ?? join(here, 'routes.config.json');
@@ -111,13 +113,20 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       output_tokens: fields.usage?.output_tokens ?? 0,
       cache_read_input_tokens: fields.usage?.cache_read_input_tokens ?? 0,
       cache_creation_input_tokens: fields.usage?.cache_creation_input_tokens ?? 0,
+      // The TTL split and thinking cost are dropped by the legacy flat
+      // logEvent payload. Pass them through so the stats pipeline can
+      // attribute the cache choice per model and surface Opus's hidden
+      // thinking tokens.
+      cache_5m_input_tokens: fields.usage?.cache_creation?.ephemeral_5m_input_tokens ?? 0,
+      cache_1h_input_tokens: fields.usage?.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+      thinking_tokens: fields.usage?.output_tokens_details?.thinking_tokens ?? 0,
     });
   };
   const upstreamReq = https.request(
     {
       protocol: conn.url.protocol,
       hostname: conn.url.hostname,
-      port: conn.url.port || 443,
+      port: conn.url.port || (conn.url.protocol === 'http:' ? 80 : 443),
       method: req.method,
       path: upstreamPath,
       headers,
@@ -163,8 +172,13 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
         if (!res.writableEnded) res.end();
         // SSE is the common case; fall back to JSON for non-streaming
         // responses (e.g. a 400 from the upstream returned as application/json).
+        // normalizeUsage flattens the nested cache_creation TTL split and
+        // guarantees output_tokens_details is present (defaulting to 0) so
+        // every downstream consumer sees a stable shape regardless of
+        // which model produced the response.
         const text = Buffer.concat(respChunks).toString('utf8');
-        const usage = extractUsageFromSse(text) ?? parseJsonUsage(text);
+        const rawUsage = extractUsageFromSse(text) ?? parseJsonUsage(text);
+        const usage = normalizeUsage(rawUsage);
         if (upstreamStatus === 200) onResponse?.(model, id, text, reqBody);
         finalize({
           upstream: conn.url.host,
@@ -304,7 +318,12 @@ export function handleRequest(req, res) {
   });
 }
 
-const server = http.createServer(handleRequest);
+// Factory, not a top-level binding, so importing this module from a test
+// does not start a listening server (which would keep node --test alive
+// long after the assertions complete and hang the suite).
+export function createServer() {
+  return http.createServer(handleRequest);
+}
 
 // Wire graceful SIGTERM shutdown. The router stops accepting new
 // connections, lets in-flight streaming responses finish, and only exits
@@ -356,20 +375,28 @@ export function installShutdown(srv, { exit = process.exit } = {}) {
   return { openConnections, get shuttingDown() { return shuttingDown; }, onSigterm };
 }
 
-server.listen(PORT, () => {
-  console.log(`Router on http://localhost:${PORT}`);
-  console.log(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
-  console.log(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);
-  // Yellow banner confirms colorized log code is loaded. If you don't see
-  // this in yellow, you're running the wrong code (or a version without
-  // color support).
-  let headSha = 'unknown';
-  try {
-    headSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: here, encoding: 'utf8' }).trim();
-  } catch {
-    // Not running from a git checkout; the banner is best-effort.
-  }
-  console.log(`\x1b[33m[router] log color enabled (commit HEAD = ${headSha})\x1b[0m`);
-});
-
-installShutdown(server);
+// Entry-point guard: only bind the port and wire SIGTERM when this module
+// is the script Node was told to run (`node router/server.js`,
+// `npm run router`). When tests `import './server.js'`, process.argv[1]
+// points elsewhere and this block is skipped, so the test runner can
+// exit cleanly without us holding a port open.
+const isEntry = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+if (isEntry) {
+  const server = createServer();
+  server.listen(PORT, () => {
+    console.log(`Router on http://localhost:${PORT}`);
+    console.log(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
+    console.log(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);
+    // Yellow banner confirms colorized log code is loaded. If you don't see
+    // this in yellow, you're running the wrong code (or a version without
+    // color support).
+    let headSha = 'unknown';
+    try {
+      headSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: here, encoding: 'utf8' }).trim();
+    } catch {
+      // Not running from a git checkout; the banner is best-effort.
+    }
+    console.log(`\x1b[33m[router] log color enabled (commit HEAD = ${headSha})\x1b[0m`);
+  });
+  installShutdown(server);
+}
