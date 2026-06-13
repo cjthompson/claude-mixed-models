@@ -1,0 +1,10 @@
+.env
+.env.example
+.git
+.gitignore
+.worktrees
+CHANGELOG.md
+Dockerfile
+docs
+*.log
+router/routes.config.json

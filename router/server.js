@@ -8,13 +8,18 @@ import { resolveRoute } from './routes.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
 import { extractUsageFromSse } from '../lib/sse.js';
 import { logEvent } from '../lib/event.js';
+import { createSampler } from './instrumentation.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const config = JSON.parse(readFileSync(join(here, 'routes.config.json'), 'utf8'));
+const configPath = process.env.ROUTES_CONFIG ?? join(here, 'routes.config.json');
+const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const PORT = Number(process.env.ROUTER_PORT ?? 8788);
 const DEFAULT_UPSTREAM = process.env.DEFAULT_UPSTREAM ?? 'anthropic';
 
 const HOP_BY_HOP = ['transfer-encoding', 'connection', 'keep-alive', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer'];
+
+let onResponse = null;
+if (process.env.SAMPLE_SSE) onResponse = createSampler();
 
 // Recognized values for the `auth` field in routes.config.json. Anything else
 // is a config typo and the router refuses to start rather than silently
@@ -72,9 +77,12 @@ export function applyToolCompat(body, upstreamName) {
   if (patched > 0) console.error(`[tool-compat] injected input_schema on ${patched} tool entry/entries for ${upstreamName}`);
 }
 
-export function forward(req, res, conn, outBody, { id, t0, session, model, realModel }) {
+export function forward(req, res, conn, outBody, { id, t0, session, model, realModel, reqBody }) {
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
+  // Prevent upstream from gzip-encoding the response — the router reads the raw
+  // bytes to extract usage tokens, and compressed SSE is unreadable as UTF-8.
+  delete headers['accept-encoding'];
   headers.host = conn.url.host;
   headers['content-length'] = String(outBody.length);
   applyAuth(headers, conn);
@@ -105,12 +113,6 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       cache_creation_input_tokens: fields.usage?.cache_creation_input_tokens ?? 0,
     });
   };
-  // TEMPORARY HEADER DIAGNOSTIC
-  const cacheHeaders = Object.fromEntries(
-    Object.entries(headers).filter(([k]) => k.toLowerCase().includes('cache') || k.toLowerCase().includes('beta') || k.toLowerCase() === 'anthropic-version')
-  );
-  console.error(`[hdr-req] id=${id} cache/beta headers: ${JSON.stringify(cacheHeaders)}`);
-
   const upstreamReq = https.request(
     {
       protocol: conn.url.protocol,
@@ -121,11 +123,6 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       headers,
     },
     (upstreamRes) => {
-      // TEMPORARY HEADER DIAGNOSTIC
-      const resCacheHeaders = Object.fromEntries(
-        Object.entries(upstreamRes.headers).filter(([k]) => k.toLowerCase().includes('cache') || k.toLowerCase().includes('beta') || k.toLowerCase().includes('x-ratelimit') || k.toLowerCase().includes('anthropic'))
-      );
-      console.error(`[hdr-res] id=${id} status=${upstreamRes.statusCode} cache/beta headers: ${JSON.stringify(resCacheHeaders)}`);
       // Track the upstream status so the client-disconnect path can log it.
       const upstreamStatus = upstreamRes.statusCode ?? 502;
       const safeHeaders = { ...upstreamRes.headers };
@@ -168,6 +165,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
         // responses (e.g. a 400 from the upstream returned as application/json).
         const text = Buffer.concat(respChunks).toString('utf8');
         const usage = extractUsageFromSse(text) ?? parseJsonUsage(text);
+        if (upstreamStatus === 200) onResponse?.(model, id, text, reqBody);
         finalize({
           upstream: conn.url.host,
           status: upstreamStatus,
@@ -302,7 +300,7 @@ export function handleRequest(req, res) {
       session,
     });
 
-    forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel });
+    forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel, reqBody: parsedBody });
   });
 }
 
