@@ -21,6 +21,15 @@ CREATE TABLE IF NOT EXISTS events (
   output_tokens               INTEGER NOT NULL DEFAULT 0,
   cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
   cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  -- Cache TTL split (Anthropic's nested cache_creation view, flattened
+  -- by lib/usage.js). Sum equals cache_creation_input_tokens. Either
+  -- column alone is enough to derive the per-TTL cost on the rollup side.
+  cache_5m_input_tokens       INTEGER NOT NULL DEFAULT 0,
+  cache_1h_input_tokens       INTEGER NOT NULL DEFAULT 0,
+  -- Extended-thinking tokens. Always 0 for non-thinking models (Haiku
+  -- never, Sonnet/Opus when thinking is off). Defaulting here lets the
+  -- rollup SUM() the field without per-row COALESCE noise.
+  thinking_tokens             INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (id, ts)
 );
 
@@ -42,6 +51,9 @@ CREATE TABLE IF NOT EXISTS rollup_5m (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read    INTEGER NOT NULL DEFAULT 0,
   cache_write   INTEGER NOT NULL DEFAULT 0,
+  cache_5m      INTEGER NOT NULL DEFAULT 0,
+  cache_1h      INTEGER NOT NULL DEFAULT 0,
+  thinking      INTEGER NOT NULL DEFAULT 0,
   p50_ms        INTEGER,
   p95_ms        INTEGER,
   PRIMARY KEY (bucket_start, model, upstream)
@@ -59,6 +71,9 @@ CREATE TABLE IF NOT EXISTS rollup_1h (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read    INTEGER NOT NULL DEFAULT 0,
   cache_write   INTEGER NOT NULL DEFAULT 0,
+  cache_5m      INTEGER NOT NULL DEFAULT 0,
+  cache_1h      INTEGER NOT NULL DEFAULT 0,
+  thinking      INTEGER NOT NULL DEFAULT 0,
   p50_ms        INTEGER,
   p95_ms        INTEGER,
   PRIMARY KEY (bucket_start, model, upstream)
@@ -76,8 +91,18 @@ CREATE TABLE IF NOT EXISTS rollup_1d (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read    INTEGER NOT NULL DEFAULT 0,
   cache_write   INTEGER NOT NULL DEFAULT 0,
+  cache_5m      INTEGER NOT NULL DEFAULT 0,
+  cache_1h      INTEGER NOT NULL DEFAULT 0,
+  thinking      INTEGER NOT NULL DEFAULT 0,
   p50_ms        INTEGER,
   p95_ms        INTEGER,
   PRIMARY KEY (bucket_start, model, upstream)
 );
 CREATE INDEX IF NOT EXISTS idx_1d_bucket ON rollup_1d(bucket_start);
+
+-- Tracks when each rollup grain was last fully recomputed from events.
+-- Defaults to epoch so startup always triggers a full refresh.
+CREATE TABLE IF NOT EXISTS rollup_refresh (
+  grain        TEXT NOT NULL PRIMARY KEY,
+  last_refresh TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'
+);

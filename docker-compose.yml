@@ -1,0 +1,18 @@
+services:
+  router:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${ROUTER_PORT:-8788}:${ROUTER_PORT:-8788}"
+      - "${STATS_PORT:-8789}:${STATS_PORT:-8789}"
+    env_file:
+      - .env
+    environment:
+      ROUTES_CONFIG: /config/routes.config.json
+      STATS_BIND: "::"
+    volumes:
+      - ./router/routes.config.json:/config/routes.config.json:ro
+      - stats-data:/root/.local/state/claude-mixed-models
+
+volumes:
+  stats-data:

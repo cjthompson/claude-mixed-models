@@ -11,11 +11,13 @@ import {
   topSessions,
   errorsByStatus,
   todaysTotals,
+  thinkingByModel,
 } from '../queries.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DB_PATH  = process.env.STATS_DB_PATH  ?? `${process.env.HOME}/.local/state/claude-mixed-models/router.stats.db`;
 const DEFAULT_PORT     = Number(process.env.STATS_PORT ?? 8789);
+const DEFAULT_BIND     = process.env.STATS_BIND ?? '127.0.0.1';
 const DEFAULT_PUBLIC_DIR = join(here, '..', 'public');
 
 const MIME = {
@@ -54,6 +56,7 @@ function buildApiHandler(dbPath) {
         topModels:            query(dbPath, range, topModels),
         topSessions:          query(dbPath, range, topSessions),
         errorsByStatus:       query(dbPath, range, errorsByStatus),
+        thinkingByModel:      query(dbPath, range, thinkingByModel),
         // todaysTotals takes no range arg ("today" is always "today" in UTC).
         todaysTotals:         query(dbPath, 'all', todaysTotals),
       };
@@ -90,7 +93,7 @@ function buildStaticHandler(publicDir) {
 }
 
 // Exported for tests; the production bottom-of-module call starts the server.
-export async function startServer({ dbPath = DEFAULT_DB_PATH, port = DEFAULT_PORT, publicDir = DEFAULT_PUBLIC_DIR, host = '127.0.0.1' } = {}) {
+export async function startServer({ dbPath = DEFAULT_DB_PATH, port = DEFAULT_PORT, publicDir = DEFAULT_PUBLIC_DIR, host = DEFAULT_BIND } = {}) {
   const apiHandler    = buildApiHandler(dbPath);
   const staticHandler = buildStaticHandler(publicDir);
   const server = http.createServer((req, res) => {
