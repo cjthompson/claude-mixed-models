@@ -24,6 +24,9 @@ main {
   padding: 1rem;
 }
 .card { background: var(--card-bg); border-radius: 6px; padding: 1rem 1.2rem; }
+.card--wide  { grid-column: span 2; }
+.card--tall  { grid-row: span 2; }
+.card--large { grid-column: span 2; grid-row: span 2; }
 .card h2 { margin: 0 0 0.8rem 0; font-size: 0.95rem; font-weight: 500; color: var(--muted); }
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { padding: 0.4rem 0.5rem; text-align: left; border-bottom: 1px solid #333; }
