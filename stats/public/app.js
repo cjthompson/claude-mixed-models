@@ -121,6 +121,14 @@ function renderStackedBar(canvasId, labels, series, valueFor) {
   });
 }
 
-document.getElementById('range').addEventListener('change', refresh);
+document.getElementById('range').addEventListener('change', () => {
+  localStorage.setItem('stats-range', document.getElementById('range').value);
+  refresh();
+});
+const VALID_RANGES = ['24h', '7d', '30d', 'all'];
+const savedRange = localStorage.getItem('stats-range');
+if (savedRange && VALID_RANGES.includes(savedRange)) {
+  document.getElementById('range').value = savedRange;
+}
 refresh();
 setInterval(refresh, 10_000);
