@@ -13,6 +13,7 @@ import {
   errorsByStatus,
   todaysTotals,
   thinkingByModel,
+  rangeTotals,
 } from './queries.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -169,4 +170,20 @@ test('topModels: includes cache_5m, cache_1h, and thinking sums', () => {
   assert.equal(opus.cache_5m, 0);
   assert.equal(opus.cache_1h, 0);
   assert.equal(opus.thinking, 83);
+});
+
+test('rangeTotals: sums requests and tokens over the selected range', () => {
+  const db = freshDb();
+  buildRollups(db);
+  // 'all' range: covers both seeded days
+  const all = rangeTotals(db, 'all');
+  assert.equal(all.requests, 5);
+  assert.equal(all.input_tokens, 1000);
+  assert.equal(all.output_tokens, 100);
+  assert.equal(typeof all.thinking, 'number');
+
+  // '24h' range: seed data is historical, so should return zeros
+  const h24 = rangeTotals(db, '24h');
+  assert.equal(h24.requests, 0);
+  assert.equal(typeof h24.input_tokens, 'number');
 });

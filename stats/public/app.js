@@ -73,7 +73,9 @@ async function refresh() {
   }
 
   // Today's totals
-  const t = data.todaysTotals ?? {};
+  const t = data.rangeTotals ?? {};
+  const RANGE_LABELS = { '24h': '24 hours', '7d': '7 days', '30d': '30 days', 'all': 'All time' };
+  document.querySelector('#card-totals h2').textContent = RANGE_LABELS[range] ?? range;
   // Show the thinking line only when the day had any — most days on a
   // Haiku/Sonnet-only workload will be 0, and "Thinking 0" would just
   // be visual noise.

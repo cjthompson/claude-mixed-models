@@ -41,7 +41,7 @@ test('startServer: GET /api/stats returns JSON for a populated DB', async () => 
       assert.ok('topModels' in json);
       assert.ok('topSessions' in json);
       assert.ok('errorsByStatus' in json);
-      assert.ok('todaysTotals' in json);
+      assert.ok('rangeTotals' in json);
     } finally {
       await close();
     }

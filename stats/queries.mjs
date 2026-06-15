@@ -149,3 +149,29 @@ export function todaysTotals(db) {
     WHERE bucket_start = ?
   `).get(today) ?? { requests: 0, input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, thinking: 0 };
 }
+
+export function rangeTotals(db, range = '7d') {
+  if (range === '30d' || range === 'all') {
+    return db.prepare(`
+      SELECT
+        COALESCE(SUM(requests), 0)      AS requests,
+        COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cache_read), 0)    AS cache_read,
+        COALESCE(SUM(cache_write), 0)   AS cache_write,
+        COALESCE(SUM(thinking), 0)      AS thinking
+      FROM rollup_1d
+    `).get() ?? { requests: 0, input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, thinking: 0 };
+  }
+  return db.prepare(`
+    SELECT
+      COALESCE(SUM(requests), 0)      AS requests,
+      COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+      COALESCE(SUM(cache_read), 0)    AS cache_read,
+      COALESCE(SUM(cache_write), 0)   AS cache_write,
+      COALESCE(SUM(thinking), 0)      AS thinking
+    FROM rollup_1h
+    WHERE ${withRange(range, '1=1', 'bucket_start')}
+  `).get(...bindRange(range)) ?? { requests: 0, input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, thinking: 0 };
+}

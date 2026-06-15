@@ -11,7 +11,7 @@ import {
   topModels,
   topSessions,
   errorsByStatus,
-  todaysTotals,
+  rangeTotals,
   thinkingByModel,
 } from '../queries.mjs';
 
@@ -58,8 +58,7 @@ function buildApiHandler(dbPath) {
         topSessions:          query(dbPath, range, topSessions),
         errorsByStatus:       query(dbPath, range, errorsByStatus),
         thinkingByModel:      query(dbPath, range, thinkingByModel),
-        // todaysTotals takes no range arg ("today" is always "today" in UTC).
-        todaysTotals:         query(dbPath, 'all', todaysTotals),
+        rangeTotals:          query(dbPath, range, rangeTotals),
       };
       const json = JSON.stringify(payload);
       const etag = '"' + createHash('sha1').update(json).digest('hex').slice(0, 16) + '"';
