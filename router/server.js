@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { resolveRoute } from './routes.js';
 import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
-import { extractUsageFromSse } from '../lib/sse.js';
+import { SseLineScanner } from '../lib/sse.js';
 import { normalizeUsage } from '../lib/usage.js';
 import { logEvent } from '../lib/event.js';
 import { createSampler } from './instrumentation.js';
@@ -143,17 +143,20 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       if (upstreamStatus !== 200) {
         res.writeHead(upstreamStatus, safeHeaders);
       }
-      // Buffer chunks so we can scan the SSE stream for the final `usage`
-      // block on end, while still writing each chunk to the client
-      // immediately.
-      const respChunks = [];
+      const scanner = new SseLineScanner();
+      let chunkCount = 0;
+      const isEventStream = (upstreamRes.headers['content-type'] ?? '').includes('event-stream');
+      const jsonChunks = [];   // buffered only for non-SSE responses (small error/sync bodies)
       upstreamRes.on('data', (c) => {
-        respChunks.push(c);
+        chunkCount++;
+        scanner.push(c);
+        if (!isEventStream) jsonChunks.push(c);
         if (!res.headersSent) res.writeHead(upstreamStatus, safeHeaders);
         if (!res.writableEnded) res.write(c);
       });
       upstreamRes.on('end', () => {
-        if (upstreamStatus === 200 && respChunks.length === 0) {
+        scanner.flush();
+        if (upstreamStatus === 200 && chunkCount === 0) {
           console.error(`[UPSTREAM EMPTY RESPONSE] upstream=${conn.url.host} sent HTTP 200 with empty body`);
           if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
           if (!res.writableEnded) res.end(JSON.stringify({ error: 'upstream returned empty response (HTTP 200)' }));
@@ -176,10 +179,10 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
         // guarantees output_tokens_details is present (defaulting to 0) so
         // every downstream consumer sees a stable shape regardless of
         // which model produced the response.
-        const text = Buffer.concat(respChunks).toString('utf8');
-        const rawUsage = extractUsageFromSse(text) ?? parseJsonUsage(text);
+        const jsonText = isEventStream ? null : Buffer.concat(jsonChunks).toString('utf8');
+        const rawUsage = scanner.usage ?? parseJsonUsage(jsonText);
         const usage = normalizeUsage(rawUsage);
-        if (upstreamStatus === 200) onResponse?.(model, id, text, reqBody);
+        if (upstreamStatus === 200) onResponse?.(model, id, jsonText, reqBody);
         finalize({
           upstream: conn.url.host,
           status: upstreamStatus,
