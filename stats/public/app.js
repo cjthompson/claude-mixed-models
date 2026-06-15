@@ -9,6 +9,44 @@ function hashKey(s) {
 const PALETTE = ['#a479e2', '#4a86e8', '#16a766', '#fad165', '#ffad47', '#fb4c2f', '#999999', '#f691b3', '#43d692', '#ff7537', '#7bd3f7', '#b9e4d0'];
 function colorFor(s) { return PALETTE[hashKey(s) % PALETTE.length]; }
 
+// Map raw model names (as stored in the DB) to canonical display names.
+// Multiple raw names that map to the same canonical will have their stats
+// summed client-side (see aggregateByCanonical below).
+const MODEL_ALIASES = {
+  // Sonnet 4.6 variants
+  'claude-sonnet-4-6':       'Sonnet 4.6',
+  'claude-sonnet-4-6[1m]':   'Sonnet 4.6',
+  'sonnet[1m]':               'Sonnet 4.6',
+  'sonnet':                   'Sonnet 4.6',
+  // Haiku 4.5 variants
+  'claude-haiku-4-5':                'Haiku 4.5',
+  'claude-haiku-4-5-20251001':       'Haiku 4.5',
+  'haiku':                           'Haiku 4.5',
+  // Opus variants
+  'claude-opus':              'Opus',
+  'claude-opus-4-7':          'Opus',
+  'claude-opus-4-8':          'Opus',
+  'opus':                     'Opus',
+  // MiniMax variants
+  'minimax':                  'MiniMax',
+  'minimax-m2.7':             'MiniMax M2.7',
+};
+
+function canonicalModel(name) {
+  return MODEL_ALIASES[name] ?? name;
+}
+
+function aggregateByCanonical(rows, numericKeys) {
+  const order = [];
+  const acc = {};
+  for (const r of rows) {
+    const key = canonicalModel(r.model);
+    if (!acc[key]) { acc[key] = { model: key }; for (const k of numericKeys) acc[key][k] = 0; order.push(key); }
+    for (const k of numericKeys) acc[key][k] += r[k] ?? 0;
+  }
+  return order.map((k) => acc[k]);
+}
+
 const charts = {};
 
 function abbrev(n) {
@@ -48,10 +86,12 @@ async function refresh() {
   // Tokens per day (stacked by model)
   const dayMap = {};
   for (const r of data.tokensByDay ?? []) {
-    (dayMap[r.date] ??= {})[r.model] = r.tokens;
+    const cm = canonicalModel(r.model);
+    const day = dayMap[r.date] ??= {};
+    day[cm] = (day[cm] ?? 0) + r.tokens;
   }
   const days = Object.keys(dayMap).sort();
-  const models = [...new Set((data.tokensByDay ?? []).map((r) => r.model))].sort();
+  const models = [...new Set((data.tokensByDay ?? []).map((r) => canonicalModel(r.model)))].sort();
   renderStackedBar('chart-tokens', days, models, (day, model) => dayMap[day]?.[model] ?? 0);
 
   // Requests by hour-of-day
@@ -59,12 +99,20 @@ async function refresh() {
     (data.requestsByHourOfDay ?? []).map((r) => r.requests));
 
   // Cache hit rate (percent)
-  renderBars('chart-cache', (data.cacheHitRateByModel ?? []).map((r) => r.model),
-    (data.cacheHitRateByModel ?? []).map((r) => Math.round(r.hitRate * 100)),
-    (data.cacheHitRateByModel ?? []).map((r) => colorFor(r.model)));
+  const cacheRows = [];
+  const seenCache = new Set();
+  for (const r of data.cacheHitRateByModel ?? []) {
+    const cm = canonicalModel(r.model);
+    if (!seenCache.has(cm)) { seenCache.add(cm); cacheRows.push({ model: cm, hitRate: r.hitRate }); }
+  }
+  renderBars('chart-cache', cacheRows.map((r) => r.model),
+    cacheRows.map((r) => Math.round(r.hitRate * 100)),
+    cacheRows.map((r) => colorFor(r.model)));
 
   // Top models
-  document.querySelector('#table-models tbody').innerHTML = (data.topModels ?? []).map((r) => `
+  const topModels = aggregateByCanonical(data.topModels ?? [],
+    ['requests', 'input_tokens', 'output_tokens', 'cache_read', 'cache_write', 'thinking', 'errors']);
+  document.querySelector('#table-models tbody').innerHTML = topModels.map((r) => `
     <tr>
       <td><span class="session-swatch" style="background:${colorFor(r.model)}"></span>${r.model}</td>
       <td>${abbrev(r.requests)}</td>
