@@ -3,6 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import {
   tokensByDay,
   requestsByHourOfDay,
@@ -60,8 +61,15 @@ function buildApiHandler(dbPath) {
         // todaysTotals takes no range arg ("today" is always "today" in UTC).
         todaysTotals:         query(dbPath, 'all', todaysTotals),
       };
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(payload));
+      const json = JSON.stringify(payload);
+      const etag = '"' + createHash('sha1').update(json).digest('hex').slice(0, 16) + '"';
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json', 'etag': etag });
+      res.end(json);
     } catch (err) {
       console.error('[stats-server] query error:', err.message);
       res.writeHead(500, { 'content-type': 'application/json' });

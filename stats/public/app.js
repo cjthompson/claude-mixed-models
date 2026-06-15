@@ -48,6 +48,7 @@ function aggregateByCanonical(rows, numericKeys) {
 }
 
 const charts = {};
+let lastEtag = null;
 
 function abbrev(n) {
   if (n == null) return '—';
@@ -60,8 +61,11 @@ async function refresh() {
   const range = document.getElementById('range').value;
   let data;
   try {
-    const res = await fetch(`/api/stats?range=${range}`);
+    const headers = lastEtag ? { 'If-None-Match': lastEtag } : {};
+    const res = await fetch(`/api/stats?range=${range}`, { headers });
+    if (res.status === 304) return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    lastEtag = res.headers.get('etag');
     data = await res.json();
   } catch (err) {
     console.error('fetch failed', err);
