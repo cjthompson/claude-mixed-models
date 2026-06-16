@@ -7,6 +7,8 @@
 function rangeThreshold(range) {
   const now = new Date();
   switch (range) {
+    case '1h':  now.setUTCHours(now.getUTCHours() - 1); break;
+    case '5h':  now.setUTCHours(now.getUTCHours() - 5); break;
     case '24h': now.setUTCDate(now.getUTCDate() - 1); break;
     case '7d':  now.setUTCDate(now.getUTCDate() - 7); break;
     case '30d': now.setUTCDate(now.getUTCDate() - 30); break;
@@ -14,6 +16,12 @@ function rangeThreshold(range) {
     default: throw new Error(`unknown range: ${range}`);
   }
   return now.toISOString();
+}
+
+function rollupTable(range) {
+  if (range === '1h' || range === '5h') return 'rollup_5m';
+  if (range === '30d' || range === 'all') return 'rollup_1d';
+  return 'rollup_1h';
 }
 
 // `tsCol` is the time column to filter on: 'ts' for the raw events table,
@@ -31,7 +39,6 @@ function bindRange(range, ...rest) {
 
 // Stacked bar chart, 30 days, by model. The rollup already aggregates by day.
 export function tokensByDay(db, range = '30d') {
-  // Read from rollup_1d for the 30d case, rollup_1h for shorter windows.
   if (range === '30d' || range === 'all') {
     return db.prepare(`
       SELECT bucket_start AS date, model, SUM(input_tokens + output_tokens) AS tokens
@@ -39,6 +46,16 @@ export function tokensByDay(db, range = '30d') {
       GROUP BY date, model
       ORDER BY date, model
     `).all();
+  }
+  if (range === '1h' || range === '5h') {
+    // Return per-5m buckets so the chart shows fine-grained resolution.
+    return db.prepare(`
+      SELECT bucket_start AS date, model, SUM(input_tokens + output_tokens) AS tokens
+      FROM rollup_5m
+      WHERE ${withRange(range, '1=1', 'bucket_start')}
+      GROUP BY date, model
+      ORDER BY date, model
+    `).all(...bindRange(range));
   }
   return db.prepare(`
     SELECT substr(bucket_start, 1, 10) AS date, model, SUM(input_tokens + output_tokens) AS tokens
@@ -53,7 +70,7 @@ export function tokensByDay(db, range = '30d') {
 export function requestsByHourOfDay(db, range = '7d') {
   const rows = db.prepare(`
     SELECT strftime('%H', bucket_start) AS hour, SUM(requests) AS requests
-    FROM rollup_1h
+    FROM ${rollupTable(range)}
     WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY hour
   `).all(...bindRange(range));
@@ -69,7 +86,7 @@ export function cacheHitRateByModel(db, range = '7d') {
            CASE WHEN SUM(input_tokens + cache_read + cache_write) > 0
                 THEN CAST(SUM(cache_read) AS REAL) / SUM(input_tokens + cache_read + cache_write)
                 ELSE 0 END AS hitRate
-    FROM rollup_1h
+    FROM ${rollupTable(range)}
     WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY model
     ORDER BY hitRate DESC
@@ -88,7 +105,7 @@ export function topModels(db, range = '7d', limit = 5) {
            SUM(cache_5m) AS cache_5m,
            SUM(cache_1h) AS cache_1h,
            SUM(thinking) AS thinking
-    FROM rollup_1h
+    FROM ${rollupTable(range)}
     WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY model
     ORDER BY input_tokens + cache_read + cache_write DESC
@@ -118,7 +135,7 @@ export function topSessions(db, range = '7d', limit = 5) {
 export function thinkingByModel(db, range = '7d') {
   return db.prepare(`
     SELECT model, SUM(thinking) AS thinking
-    FROM rollup_1h
+    FROM ${rollupTable(range)}
     WHERE ${withRange(range, 'thinking > 0', 'bucket_start')}
     GROUP BY model
     ORDER BY thinking DESC
@@ -171,7 +188,7 @@ export function rangeTotals(db, range = '7d') {
       COALESCE(SUM(cache_read), 0)    AS cache_read,
       COALESCE(SUM(cache_write), 0)   AS cache_write,
       COALESCE(SUM(thinking), 0)      AS thinking
-    FROM rollup_1h
+    FROM ${rollupTable(range)}
     WHERE ${withRange(range, '1=1', 'bucket_start')}
   `).get(...bindRange(range)) ?? { requests: 0, input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, thinking: 0 };
 }

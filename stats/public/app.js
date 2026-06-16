@@ -74,7 +74,7 @@ async function refresh() {
 
   // Today's totals
   const t = data.rangeTotals ?? {};
-  const RANGE_LABELS = { '24h': '24 hours', '7d': '7 days', '30d': '30 days', 'all': 'All time' };
+  const RANGE_LABELS = { '1h': '1 hour', '5h': '5 hours', '24h': '24 hours', '7d': '7 days', '30d': '30 days', 'all': 'All time' };
   document.querySelector('#card-totals h2').textContent = RANGE_LABELS[range] ?? range;
   // Show the thinking line only when the day had any — most days on a
   // Haiku/Sonnet-only workload will be 0, and "Thinking 0" would just
@@ -89,7 +89,9 @@ async function refresh() {
     ${thinkingLine}
   `;
 
-  // Tokens per day (stacked by model)
+  // Tokens per day/bucket (stacked by model)
+  const is5mRange = range === '1h' || range === '5h';
+  document.querySelector('.card--wide h2').textContent = is5mRange ? 'Tokens per 5m' : 'Tokens per day';
   const dayMap = {};
   for (const r of data.tokensByDay ?? []) {
     const cm = canonicalModel(r.model);
@@ -97,8 +99,11 @@ async function refresh() {
     day[cm] = (day[cm] ?? 0) + r.tokens;
   }
   const days = Object.keys(dayMap).sort();
+  // For 5m-resolution ranges, format ISO timestamps as HH:MM for readability.
+  const dayLabels = is5mRange ? days.map((d) => d.slice(11, 16)) : days;
+  const labelKey = is5mRange ? Object.fromEntries(dayLabels.map((l, i) => [l, days[i]])) : null;
   const models = [...new Set((data.tokensByDay ?? []).map((r) => canonicalModel(r.model)))].sort();
-  renderStackedBar('chart-tokens', days, models, (day, model) => dayMap[day]?.[model] ?? 0);
+  renderStackedBar('chart-tokens', dayLabels, models, (label, model) => dayMap[labelKey ? labelKey[label] : label]?.[model] ?? 0);
 
   // Requests by hour-of-day
   renderBars('chart-hours', (data.requestsByHourOfDay ?? []).map((r) => String(r.hour).padStart(2, '0')),
@@ -145,8 +150,15 @@ async function refresh() {
 }
 
 function renderBars(canvasId, labels, values, colors = '#4a86e8') {
+  if (charts[canvasId]) {
+    const c = charts[canvasId];
+    c.data.labels = labels;
+    c.data.datasets[0].data = values;
+    c.data.datasets[0].backgroundColor = colors;
+    c.update('none');
+    return;
+  }
   const ctx = document.getElementById(canvasId).getContext('2d');
-  if (charts[canvasId]) charts[canvasId].destroy();
   charts[canvasId] = new Chart(ctx, {
     type: 'bar',
     data: { labels, datasets: [{ data: values, backgroundColor: colors }] },
@@ -155,19 +167,32 @@ function renderBars(canvasId, labels, values, colors = '#4a86e8') {
 }
 
 function renderStackedBar(canvasId, labels, series, valueFor) {
+  const datasets = series.map((name) => ({
+    label: name,
+    data: labels.map((d) => valueFor(d, name)),
+    backgroundColor: colorFor(name),
+    stack: 'tokens',
+  }));
+
+  if (charts[canvasId]) {
+    const c = charts[canvasId];
+    // Preserve which models the user has toggled off in the legend
+    const hidden = new Set(
+      c.data.datasets.filter((_, i) => !c.isDatasetVisible(i)).map((ds) => ds.label)
+    );
+    c.data.labels = labels;
+    c.data.datasets = datasets;
+    datasets.forEach((ds, i) => {
+      c.getDatasetMeta(i).hidden = hidden.has(ds.label) ? true : null;
+    });
+    c.update('none');
+    return;
+  }
+
   const ctx = document.getElementById(canvasId).getContext('2d');
-  if (charts[canvasId]) charts[canvasId].destroy();
   charts[canvasId] = new Chart(ctx, {
     type: 'bar',
-    data: {
-      labels,
-      datasets: series.map((name) => ({
-        label: name,
-        data: labels.map((d) => valueFor(d, name)),
-        backgroundColor: colorFor(name),
-        stack: 'tokens',
-      })),
-    },
+    data: { labels, datasets },
     options: {
       plugins: { legend: { display: true } },
       scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },

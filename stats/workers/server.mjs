@@ -43,7 +43,7 @@ function buildApiHandler(dbPath) {
   return (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const range = url.searchParams.get('range') ?? '7d';
-    if (!['24h', '7d', '30d', 'all'].includes(range)) {
+    if (!['1h', '5h', '24h', '7d', '30d', 'all'].includes(range)) {
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: `unknown range: ${range}` }));
       return;
