@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-06-15
+
+### Tasks
+- Auto-refresh: ETag-based conditional fetch — skip redraw when stats unchanged (#stats, #performance)
+- Model aliasing in stats dashboard (#stats, #models)
+
+### Fixes
+- Stats totals card reflects selected time range instead of always "today" (#stats, #ui)
+- Stats viewer — selected time frame not persisted on refresh (#stats, #ui)
+- Stats HTML page widget layout — add configurable width/height spans (#ui, #dashboard)
+
+### Tasks
+- Replace openssl cert generation with Node crypto (#testing, #maintenance)
+- Switch SSE parser to streaming line-by-line scan (#performance, #scalability)
+
 ## 2026-06-11
 
 ### Fixes
