@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   applyAuth, applyToolCompat, forward, handleRequest,
-  installShutdown, KNOWN_AUTH_MODES,
+  installShutdown, KNOWN_AUTH_MODES, __setRouterShuttingDownForTest,
 } from './server.js';
 import { createFakeUpstream, makeObservableReqRes, SAMPLE_SSE } from '../test-helpers/fake-upstream.mjs';
 
@@ -519,6 +519,39 @@ test('forward: empty-body HTTP 200 — converts to 502 with error JSON and logs 
   assert.ok(resLine, `expected a RES line, got: ${JSON.stringify(logCaptured)}`);
   const stripped = resLine.replace(/\x1b\[[0-9;]*m/g, '');
   assert.match(stripped, /status=502/);
+});
+
+test('forward: empty-body HTTP 200 during a shutdown drain — still 502s the client, but does not log UPSTREAM EMPTY RESPONSE', async () => {
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end();
+  };
+
+  const { req, res, getStatus, getBody } = makeReqResForForward();
+  const errCaptured = [];
+  const origErr = console.error;
+  console.error = (line) => errCaptured.push(line);
+  __setRouterShuttingDownForTest(true);
+  try {
+    forward(req, res, conn, Buffer.from('{"model":"x"}'), { id: 'empty-during-shutdown', t0: Date.now() - 5 });
+    await new Promise((resolve, reject) => {
+      res.on('finish', resolve);
+      res.on('error', reject);
+      setTimeout(() => reject(new Error('forward timed out after 5s')), 5000);
+    });
+  } finally {
+    console.error = origErr;
+    __setRouterShuttingDownForTest(false);
+  }
+
+  // The client still needs an error response — only the misleading log is suppressed.
+  assert.equal(getStatus(), 502, 'empty 200 should still be converted to 502');
+  assert.ok(getBody().includes('empty response'), `expected error body, got: ${getBody()}`);
+  assert.ok(
+    !errCaptured.some((l) => /UPSTREAM EMPTY RESPONSE/.test(l)),
+    `expected no UPSTREAM EMPTY RESPONSE log during shutdown, got: ${JSON.stringify(errCaptured)}`
+  );
 });
 
 // --- installShutdown: graceful + force SIGTERM -----------------------------

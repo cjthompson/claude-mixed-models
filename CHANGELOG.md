@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-25
+
+### Fixes
+- Orchestrator (`scripts/server.mjs`) no longer forwards a duplicate SIGTERM/SIGINT to its children on a repeated signal — a second signal was hitting the router's "second SIGTERM" hard-kill path and dropping in-flight requests mid-stream during an otherwise-graceful shutdown (#router, #reliability)
+- Router no longer logs a misleading `[UPSTREAM EMPTY RESPONSE]` for connections torn down by its own shutdown drain (#router, #logging)
+
 ## 2026-06-15
 
 ### Tasks

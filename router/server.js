@@ -23,6 +23,12 @@ const HOP_BY_HOP = ['transfer-encoding', 'connection', 'keep-alive', 'upgrade', 
 let onResponse = null;
 if (process.env.SAMPLE_SSE) onResponse = createSampler();
 
+// Set by installShutdown() once a SIGTERM drain begins. Read by forward()'s
+// empty-response detector so a connection torn down by our own shutdown
+// isn't misreported as an upstream failure. Test-only setter below.
+let routerShuttingDown = false;
+export function __setRouterShuttingDownForTest(v) { routerShuttingDown = v; }
+
 // Recognized values for the `auth` field in routes.config.json. Anything else
 // is a config typo and the router refuses to start rather than silently
 // picking the wrong auth scheme at runtime.
@@ -157,7 +163,14 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       upstreamRes.on('end', () => {
         scanner.flush();
         if (upstreamStatus === 200 && chunkCount === 0) {
-          console.error(`[UPSTREAM EMPTY RESPONSE] upstream=${conn.url.host} sent HTTP 200 with empty body`);
+          // During a shutdown drain, a forced socket.destroy() on the
+          // client connection tears down this upstream request too, which
+          // Node can surface as 'end' firing with zero chunks — identical
+          // to a genuine empty 200 from the upstream's point of view. Don't
+          // blame the upstream for our own teardown.
+          if (!routerShuttingDown) {
+            console.error(`[UPSTREAM EMPTY RESPONSE] upstream=${conn.url.host} sent HTTP 200 with empty body`);
+          }
           if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
           if (!res.writableEnded) res.end(JSON.stringify({ error: 'upstream returned empty response (HTTP 200)' }));
           finalize({
@@ -363,6 +376,7 @@ export function installShutdown(srv, { exit = process.exit } = {}) {
       return;
     }
     shuttingDown = true;
+    routerShuttingDown = true;
     console.log(`[shutdown] received SIGTERM, beginning graceful shutdown (${openConnections.size} open connection(s))`);
     srv.close((err) => {
       if (err) {
