@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import {
   applyAuth, applyToolCompat, forward, handleRequest,
   installShutdown, KNOWN_AUTH_MODES, __setRouterShuttingDownForTest,
+  assertSupportedProtocol, warnIfInsecureUpstream,
 } from './server.js';
 import { createFakeUpstream, makeObservableReqRes, SAMPLE_SSE } from '../test-helpers/fake-upstream.mjs';
 
@@ -33,6 +34,11 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.STATS_EVENTS_FILE;
   rmSync(statsDir, { recursive: true, force: true });
+  // Belt-and-braces reset for the routerShuttingDown test seam: individual
+  // tests that flip it already reset it in their own `finally`, but this
+  // catches any test that throws before reaching that reset, so a later
+  // test never silently inherits "shutting down" state from an earlier one.
+  __setRouterShuttingDownForTest(false);
 });
 
 // --- applyAuth -------------------------------------------------------------
@@ -60,6 +66,81 @@ test('applyAuth: x-api-key strips incoming auth and sets x-api-key: <key>', () =
 
 test('KNOWN_AUTH_MODES: lists the three recognized modes', () => {
   assert.deepEqual([...KNOWN_AUTH_MODES].sort(), ['bearer', 'passthrough', 'x-api-key']);
+});
+
+// --- assertSupportedProtocol ------------------------------------------------
+// upstreamConn() calls this on every resolved base URL so a config typo
+// (e.g. ftp:// or a bare hostname parsed with an unexpected scheme) fails
+// fast with the same clean configuration-error path as an unknown upstream,
+// instead of reaching forward() and blowing up on request construction.
+
+test('assertSupportedProtocol: http: and https: are accepted', () => {
+  assert.doesNotThrow(() => assertSupportedProtocol(new URL('http://example.com'), 'x'));
+  assert.doesNotThrow(() => assertSupportedProtocol(new URL('https://example.com'), 'x'));
+});
+
+test('assertSupportedProtocol: unsupported scheme throws a clean config error', () => {
+  assert.throws(
+    () => assertSupportedProtocol(new URL('ftp://example.com'), 'weird-upstream'),
+    /Unsupported protocol 'ftp:' for upstream 'weird-upstream'/
+  );
+});
+
+// --- warnIfInsecureUpstream -------------------------------------------------
+// A keyed upstream (bearer/x-api-key) reachable only over http: to a
+// non-loopback host would send its API key in cleartext. warnIfInsecureUpstream
+// logs a one-time warning (no secret) for that case; every other combination
+// (https:, loopback host, or passthrough auth) is silent.
+
+function captureConsoleError() {
+  const captured = [];
+  const orig = console.error;
+  console.error = (line) => captured.push(line);
+  return { lines: captured, restore: () => { console.error = orig; } };
+}
+
+test('warnIfInsecureUpstream: warns once for a keyed http: upstream on a non-loopback host', () => {
+  const cap = captureConsoleError();
+  try {
+    warnIfInsecureUpstream(new URL('http://upstream.example.com'), 'flaky-http-upstream', 'bearer');
+    warnIfInsecureUpstream(new URL('http://upstream.example.com'), 'flaky-http-upstream', 'bearer');
+  } finally {
+    cap.restore();
+  }
+  const warnings = cap.lines.filter((l) => /WARNING.*flaky-http-upstream/.test(l));
+  assert.equal(warnings.length, 1, `expected exactly one warning across two calls, got: ${JSON.stringify(cap.lines)}`);
+  assert.match(warnings[0], /http:.*non-loopback|cleartext/i);
+});
+
+test('warnIfInsecureUpstream: passthrough auth is silent even over http: to a non-loopback host', () => {
+  const cap = captureConsoleError();
+  try {
+    warnIfInsecureUpstream(new URL('http://upstream.example.com'), 'passthrough-http-upstream', 'passthrough');
+  } finally {
+    cap.restore();
+  }
+  assert.deepEqual(cap.lines, []);
+});
+
+test('warnIfInsecureUpstream: https: is silent for keyed auth', () => {
+  const cap = captureConsoleError();
+  try {
+    warnIfInsecureUpstream(new URL('https://upstream.example.com'), 'https-upstream', 'bearer');
+  } finally {
+    cap.restore();
+  }
+  assert.deepEqual(cap.lines, []);
+});
+
+test('warnIfInsecureUpstream: loopback host is silent for keyed http: auth', () => {
+  const cap = captureConsoleError();
+  try {
+    warnIfInsecureUpstream(new URL('http://127.0.0.1:9999'), 'loopback-http-upstream', 'x-api-key');
+    warnIfInsecureUpstream(new URL('http://localhost:9999'), 'loopback-http-upstream-2', 'x-api-key');
+  } finally {
+    cap.restore();
+  }
+  assert.deepEqual(cap.lines, []);
 });
 
 // --- applyToolCompat -------------------------------------------------------
@@ -186,6 +267,50 @@ test('forward: https:// upstream reaches the error handler (regression: ERR_INVA
   const stripped = resLine.replace(/\x1b\[[0-9;]*m/g, '');
   assert.match(stripped, /status=502/);
   assert.match(stripped, /upstream=127\.0\.0\.1/);
+});
+
+// forward() must pick http.request for a plain-http:// upstream (https.request
+// rejects a 'http:' protocol option outright, and always using https.request
+// — the pre-fix behavior — throws synchronously for genuine http:// upstreams
+// before the error handler can run). Stand up a real ephemeral plain-HTTP
+// server so the request actually completes end-to-end.
+
+test('forward: http:// upstream — request reaches a real plain-HTTP server, status/body flow through, RES line emitted', async () => {
+  const plainServer = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise((resolve) => plainServer.listen(0, '127.0.0.1', resolve));
+  const port = plainServer.address().port;
+
+  try {
+    const conn = { url: new URL(`http://127.0.0.1:${port}`), key: null, auth: 'passthrough' };
+    const { req, res, getStatus, getBody } = makeObservableReqRes();
+
+    const captured = [];
+    const origLog = console.log;
+    console.log = (line) => captured.push(line);
+    try {
+      forward(req, res, conn, Buffer.from('{"model":"x"}'), { id: 'http-test', t0: Date.now() - 5 });
+      await new Promise((resolve, reject) => {
+        res.on('finish', resolve);
+        res.on('error', reject);
+        setTimeout(() => reject(new Error('forward timed out after 5s')), 5000);
+      });
+    } finally {
+      console.log = origLog;
+    }
+
+    assert.equal(getStatus(), 200);
+    assert.equal(getBody(), JSON.stringify({ ok: true }));
+    const resLine = captured.find((l) => /^\[\d{2}:\d{2}:\d{2} RES http-test\]/.test(l));
+    assert.ok(resLine, `expected a RES line, got: ${JSON.stringify(captured)}`);
+    const stripped = resLine.replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(stripped, /status=200/);
+    assert.match(stripped, /upstream=127\.0\.0\.1/);
+  } finally {
+    await new Promise((resolve) => plainServer.close(resolve));
+  }
 });
 
 // --- handleRequest — REQ line ----------------------------------------------
@@ -554,13 +679,15 @@ test('forward: empty-body HTTP 200 during a shutdown drain — still 502s the cl
   );
 });
 
-// --- installShutdown: graceful + force SIGTERM -----------------------------
-// The router is meant to drain in-flight streaming responses on SIGTERM
-// instead of killing them. We exercise the state machine directly with a
-// stub server and stub exit so we don't actually kill the test process.
-// installShutdown also wires `process.on('SIGTERM', ...)` — that's fine
-// in tests because we drive the handler through the returned `onSigterm`
-// reference rather than sending a real signal.
+// --- installShutdown: graceful + force shutdown (SIGTERM/SIGINT) -----------
+// The router is meant to drain in-flight streaming responses on the first
+// SIGTERM or SIGINT instead of killing them, and force-destroy remaining
+// sockets on any subsequent signal (including a mixed pair). We exercise
+// the state machine directly with a stub server and stub exit so we don't
+// actually kill the test process. installShutdown also wires
+// `process.on('SIGTERM'/'SIGINT', ...)` — that's fine in tests because we
+// drive the handler through the returned `onSignal` reference rather than
+// sending a real signal.
 
 function captureConsoleLog() {
   const captured = [];
@@ -599,7 +726,7 @@ test('installShutdown: graceful — logs initial open count, drains, then exits'
     assert.ok(serverSide, 'server should have tracked the new socket');
 
     // First SIGTERM: log the open count and start server.close(). No exit yet.
-    handle.onSigterm();
+    handle.onSignal('SIGTERM');
     assert.equal(handle.shuttingDown, true);
     assert.deepEqual(exitCalls, [], 'should not exit while connections are open');
     assert.match(
@@ -621,6 +748,7 @@ test('installShutdown: graceful — logs initial open count, drains, then exits'
     );
   } finally {
     cap.restore();
+    handle.uninstall();
     await new Promise((resolve) => srv.close(resolve));
   }
 });
@@ -628,14 +756,14 @@ test('installShutdown: graceful — logs initial open count, drains, then exits'
 test('installShutdown: zero connections on SIGTERM — exits cleanly', async () => {
   // The server must be listening when SIGTERM fires; that's the only
   // configuration installShutdown is meant to support. We bind to an
-  // ephemeral port; by the time the test calls onSigterm the set is empty.
+  // ephemeral port; by the time the test calls onSignal the set is empty.
   const srv = http.createServer();
   const exitCalls = [];
   const handle = installShutdown(srv, { exit: (code) => exitCalls.push(code) });
   const cap = captureConsoleLog();
   try {
     await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
-    handle.onSigterm();
+    handle.onSignal('SIGTERM');
     assert.equal(handle.shuttingDown, true);
     // server.close()'s callback fires on the next tick; exit(0) runs
     // inside it because openConnections is empty.
@@ -647,6 +775,7 @@ test('installShutdown: zero connections on SIGTERM — exits cleanly', async () 
     assert.deepEqual(exitCalls, [0]);
   } finally {
     cap.restore();
+    handle.uninstall();
     await new Promise((resolve) => srv.close(resolve));
   }
 });
@@ -679,22 +808,126 @@ test('installShutdown: second SIGTERM during drain — destroys remaining socket
     serverSide.destroy = (...args) => { destroyed = true; return origDestroy(...args); };
 
     // Begin graceful shutdown — does NOT exit (still 1 connection).
-    handle.onSigterm();
+    handle.onSignal('SIGTERM');
     assert.deepEqual(exitCalls, []);
 
     // Second SIGTERM — force path. Should destroy the remaining socket
     // and call exit(0).
-    handle.onSigterm();
+    handle.onSignal('SIGTERM');
     assert.deepEqual(exitCalls, [0]);
     assert.equal(destroyed, true, 'force path should destroy remaining socket');
     assert.ok(
-      cap.lines.some((l) => /\[shutdown\] received second SIGTERM, forcing immediate shutdown \(1 connection\(s\) still open\)/.test(l)),
+      cap.lines.some((l) => /\[shutdown\] received second signal \(SIGTERM\), forcing immediate shutdown \(1 connection\(s\) still open\)/.test(l)),
       `expected force log, got: ${JSON.stringify(cap.lines)}`
     );
 
     client.destroy();
   } finally {
     cap.restore();
+    handle.uninstall();
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});
+
+test('installShutdown: graceful — first SIGINT logs, drains, then exits', async () => {
+  // Mirrors the SIGTERM graceful test above but drives the state machine
+  // via SIGINT (e.g. Ctrl-C during local/dev use). Same drain semantics,
+  // different signal name in the log line.
+  const srv = http.createServer();
+  const exitCalls = [];
+  const handle = installShutdown(srv, { exit: (code) => exitCalls.push(code) });
+  const cap = captureConsoleLog();
+  try {
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = srv.address().port;
+    const client = net.createConnection(port, '127.0.0.1');
+    await new Promise((resolve) => client.on('connect', resolve));
+    const serverSide = await new Promise((resolve, reject) => {
+      const tick = () => {
+        const s = [...handle.openConnections][0];
+        if (s) resolve(s);
+        else setImmediate(tick);
+      };
+      tick();
+      setTimeout(() => reject(new Error('socket never appeared in tracker')), 1000);
+    });
+    assert.ok(serverSide, 'server should have tracked the new socket');
+
+    // First SIGINT: log the open count and start server.close(). No exit yet.
+    handle.onSignal('SIGINT');
+    assert.equal(handle.shuttingDown, true);
+    assert.deepEqual(exitCalls, [], 'should not exit while connections are open');
+    assert.match(
+      cap.lines.find((l) => l.startsWith('[shutdown] received SIGINT')) ?? '',
+      /\(1 open connection\(s\)\)/
+    );
+
+    // Close the client; the server-side socket should emit 'close', the
+    // tracker should remove it, the drain log should fire, and exit
+    // should be called with code 0.
+    client.destroy();
+    await new Promise((resolve) => serverSide.on('close', resolve));
+    await new Promise((resolve) => setTimeout(resolve, 20)); // let listeners settle
+    assert.equal(handle.openConnections.size, 0);
+    assert.deepEqual(exitCalls, [0]);
+    assert.ok(
+      cap.lines.some((l) => /\[shutdown\] connection closed \(0 remaining\)/.test(l)),
+      `expected drain log, got: ${JSON.stringify(cap.lines)}`
+    );
+  } finally {
+    cap.restore();
+    handle.uninstall();
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});
+
+test('installShutdown: mixed signal (SIGTERM then SIGINT) forces shutdown and logs the actual second signal', async () => {
+  // A first SIGTERM begins the graceful drain; an operator (or process
+  // supervisor) sending a different signal, SIGINT, before the drain
+  // completes must still force-destroy the remaining sockets — and the
+  // force log must name the signal that actually arrived (SIGINT), not
+  // hard-code SIGTERM.
+  const srv = http.createServer();
+  const exitCalls = [];
+  const handle = installShutdown(srv, { exit: (code) => exitCalls.push(code) });
+  const cap = captureConsoleLog();
+  try {
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    const port = srv.address().port;
+    const client = net.createConnection(port, '127.0.0.1');
+    await new Promise((resolve) => client.on('connect', resolve));
+    const serverSide = await new Promise((resolve, reject) => {
+      const tick = () => {
+        const s = [...handle.openConnections][0];
+        if (s) resolve(s);
+        else setImmediate(tick);
+      };
+      tick();
+      setTimeout(() => reject(new Error('socket never appeared in tracker')), 1000);
+    });
+    let destroyed = false;
+    const origDestroy = serverSide.destroy.bind(serverSide);
+    serverSide.destroy = (...args) => { destroyed = true; return origDestroy(...args); };
+
+    // Begin graceful shutdown via SIGTERM — does NOT exit (still 1 connection).
+    handle.onSignal('SIGTERM');
+    assert.deepEqual(exitCalls, []);
+
+    // A mixed second signal (SIGINT) — force path. Should destroy the
+    // remaining socket, exit(0), and log SIGINT (the signal that actually
+    // arrived), not SIGTERM.
+    handle.onSignal('SIGINT');
+    assert.deepEqual(exitCalls, [0]);
+    assert.equal(destroyed, true, 'force path should destroy remaining socket');
+    assert.ok(
+      cap.lines.some((l) => /\[shutdown\] received second signal \(SIGINT\), forcing immediate shutdown \(1 connection\(s\) still open\)/.test(l)),
+      `expected force log naming SIGINT, got: ${JSON.stringify(cap.lines)}`
+    );
+
+    client.destroy();
+  } finally {
+    cap.restore();
+    handle.uninstall();
     await new Promise((resolve) => srv.close(resolve));
   }
 });

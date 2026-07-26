@@ -27,9 +27,17 @@ const SCRIPTS = [
 // `process.on('SIGTERM'/'SIGINT', ...)` unconditionally (same convention as
 // router/server.js's installShutdown) — harmless in tests since they call
 // the returned `shutdown` directly rather than emitting real signals.
-export function createOrchestrator({ scripts = SCRIPTS, spawnFn = spawn, exitFn = process.exit } = {}) {
-  const procs = new Map();
+export function createOrchestrator({
+  scripts = SCRIPTS,
+  spawnFn = spawn,
+  exitFn = process.exit,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+} = {}) {
+  const procs = new Map();   // script -> currently-live child, removed on exit
+  const timers = new Map();  // script -> pending respawn timer handle
   let shuttingDown = false;
+  let shutdownPromise = null;
   const backoff = createBackoff();
 
   function start(script) {
@@ -42,18 +50,33 @@ export function createOrchestrator({ scripts = SCRIPTS, spawnFn = spawn, exitFn 
     procs.set(script, child);
     backoff.onStart(script);
     child.on('exit', (code, signal) => {
+      // Identity-safe removal: only clear this script's slot if `child` is
+      // still the current occupant of it. Guards against this handler
+      // clobbering a newer child that has since taken the slot (e.g. a
+      // respawn that raced ahead of this exit event being processed).
+      if (procs.get(script) === child) procs.delete(script);
       if (shuttingDown) return;        // expected during graceful stop
       const action = backoff.onExit(script, { code, signal });
       if (action.action === 'respawn') {
-        setTimeout(() => { if (!shuttingDown) start(script); }, action.delayMs);
+        const timer = setTimeoutFn(() => {
+          timers.delete(script);
+          // Re-check even though shutdown() also cancels this timer: keeps
+          // the callback safe on its own if it's ever invoked directly (as
+          // tests do) without going through clearTimeoutFn first.
+          if (!shuttingDown) start(script);
+        }, action.delayMs);
+        timers.set(script, timer);
       } else if (action.action === 'give-up') {
-        // Don't race with a SIGTERM that's already in flight — the shutdown
-        // handler will exit 0 cleanly via the existing promise.
-        if (shuttingDown) return;
+        // No `shuttingDown` re-check needed here: the `if (shuttingDown) return;`
+        // guard above already exits this handler when shutdown is in flight,
+        // so reaching this branch means it wasn't.
         exitFn(action.exitCode);
       }
-      // 'noop' (healthy exit) needs no scheduling: the counter was already
-      // reset inside onExit and the next start() reuses the same procs slot.
+      // 'noop' (healthy exit) needs no scheduling here: the retry counter
+      // was already reset inside onExit, and the slot this script occupied
+      // in `procs` was cleared above and stays empty. Nothing calls start()
+      // again for a healthy exit — only a crash (via the 'respawn' branch)
+      // brings the script back.
     });
   }
 
@@ -61,22 +84,59 @@ export function createOrchestrator({ scripts = SCRIPTS, spawnFn = spawn, exitFn 
 
   function shutdown(signal) {
     // A duplicate SIGTERM/SIGINT (Docker's stop path, an operator re-running
-    // `docker compose stop`, a supervisor re-delivering the signal) must not
-    // re-signal already-shutting-down children a second time — that forces
-    // the router's "second SIGTERM" hard-kill path and drops in-flight
-    // requests that were still draining gracefully.
-    if (shuttingDown) return;
+    // `docker compose stop`, a supervisor re-delivering the signal, or a
+    // mixed pair like SIGTERM then SIGINT) must not re-signal
+    // already-shutting-down children a second time — that forces the
+    // router's "second SIGTERM" hard-kill path and drops in-flight requests
+    // that were still draining gracefully.
+    if (shuttingDown) return shutdownPromise;
     shuttingDown = true;
-    return Promise.all([...procs.values()].map((c) => new Promise((resolve) => {
+
+    // Cancel every pending respawn timer so a child that crashed during its
+    // backoff wait doesn't get spawned after we've already started tearing
+    // down (the timer callback also re-checks shuttingDown as a belt-and-
+    // braces guard, but cancelling here is what actually stops it firing).
+    for (const timer of timers.values()) clearTimeoutFn(timer);
+    timers.clear();
+
+    // Snapshot only currently-live children. A child that already exited
+    // (e.g. it crashed and is sitting in backoff, waiting to respawn) was
+    // already removed from `procs` by the identity-safe removal above, so
+    // it never lands in this snapshot. That matters: calling kill() on an
+    // already-exited child would be a pointless no-op at best, and waiting
+    // on its 'exit' event would hang forever since that event already
+    // fired. An empty snapshot (all children already exited) resolves
+    // Promise.all([]) immediately, so shutdown still settles promptly.
+    const live = [...procs.values()];
+    shutdownPromise = Promise.all(live.map((c) => new Promise((resolve) => {
       c.once('exit', resolve);
       c.kill(signal);
     }))).then(() => exitFn(0));
+    return shutdownPromise;
   }
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  const onSigterm = () => shutdown('SIGTERM');
+  const onSigint = () => shutdown('SIGINT');
+  process.on('SIGTERM', onSigterm);
+  process.on('SIGINT', onSigint);
 
-  return { procs, shutdown, get shuttingDown() { return shuttingDown; } };
+  return {
+    procs,
+    shutdown,
+    get shuttingDown() { return shuttingDown; },
+    // Test-only seam: detaches the two process-level listeners this call
+    // installed. Production never calls this — the real orchestrator keeps
+    // exactly one SIGTERM/SIGINT listener pair for its lifetime. Each test
+    // calls createOrchestrator() fresh, so without this every test run
+    // would leave another pair of listeners on `process`, accumulating
+    // toward Node's MaxListeners warning and letting Ctrl-C during a later
+    // test drive a stale orchestrator's shutdown() instead of (or in
+    // addition to) the live one's.
+    uninstall() {
+      process.removeListener('SIGTERM', onSigterm);
+      process.removeListener('SIGINT', onSigint);
+    },
+  };
 }
 
 // Entry-point guard, same convention as router/server.js: only spawn real

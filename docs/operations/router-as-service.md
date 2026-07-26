@@ -129,3 +129,16 @@ Change `ROUTER_PORT` (or `STATS_PORT`) in your `.env`, then restart the service.
 The plist uses the absolute path that `command -v node` resolved to at
 install time. If you've moved your Node install, re-run
 `scripts/install-services.sh` to refresh the plist.
+
+## Upstream URLs
+
+The router forwards requests to configured upstream services using either `http:` or `https:` protocols — protocol detection and forwarding are handled transparently.
+
+**Security note:** for any upstream configured with `auth: "bearer"` or `auth: "x-api-key"`, the router attaches that upstream's API key to every forwarded request. If such an upstream's base URL uses `http:` instead of `https:`, that key crosses the network in cleartext. Limit `http:` upstreams to loopback (`localhost`/`127.0.0.1`) or otherwise fully trusted networks — anything else should use `https:`. The router logs a one-time warning (without the secret itself) when it resolves a keyed upstream configured this way.
+
+## Graceful Shutdown
+
+Termination signals trigger the following shutdown sequence:
+
+- **SIGTERM** and **SIGINT** (Ctrl+C, orchestrator stop, system shutdown) both initiate graceful shutdown. The router stops accepting new connections and drains all in-flight requests, allowing them to complete before exit.
+- **Follow-up signal** (a second SIGTERM or SIGINT) forces immediate exit. This prevents indefinite hangs if graceful shutdown stalls.

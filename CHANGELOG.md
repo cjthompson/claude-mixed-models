@@ -5,6 +5,7 @@
 ### Fixes
 - Orchestrator (`scripts/server.mjs`) no longer forwards a duplicate SIGTERM/SIGINT to its children on a repeated signal — a second signal was hitting the router's "second SIGTERM" hard-kill path and dropping in-flight requests mid-stream during an otherwise-graceful shutdown (#router, #reliability)
 - Router no longer logs a misleading `[UPSTREAM EMPTY RESPONSE]` for connections torn down by its own shutdown drain (#router, #logging)
+- Router — protocol-aware upstream forwarding (http:, https:) with graceful lifecycle management on SIGTERM/SIGINT (drain in-flight requests; follow-up signal forces exit) (#router, #reliability)
 
 ## 2026-06-15
 

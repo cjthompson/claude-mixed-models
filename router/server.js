@@ -34,6 +34,44 @@ export function __setRouterShuttingDownForTest(v) { routerShuttingDown = v; }
 // picking the wrong auth scheme at runtime.
 export const KNOWN_AUTH_MODES = new Set(['passthrough', 'bearer', 'x-api-key']);
 
+// forward() picks http.request or https.request based on this. Exported so
+// tests can exercise the validation directly with an arbitrary URL instead
+// of mutating the module-level config.
+export function assertSupportedProtocol(url, name) {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Unsupported protocol '${url.protocol}' for upstream '${name}' (expected http: or https:)`);
+  }
+}
+
+// Hosts that never leave the machine (or the same docker/VM network
+// namespace), so a cleartext credential sent to one of them isn't exposed
+// on the wire in any meaningful sense. Anything else reached over `http:`
+// is a real cleartext-credential risk.
+function isLoopbackHost(hostname) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
+// Upstream names we've already warned about, so a busy router logs the
+// cleartext-credential risk once at config-resolution time (per upstream)
+// rather than once per request.
+const warnedInsecureUpstreams = new Set();
+
+// Warn (without ever logging the secret itself) when a keyed upstream is
+// reachable only over `http:` to a non-loopback host — the bearer/API key
+// applyAuth() attaches would cross the network in cleartext. Exported so
+// tests can exercise it directly with an arbitrary URL/auth combination.
+export function warnIfInsecureUpstream(url, name, auth) {
+  if (auth === 'passthrough') return;
+  if (url.protocol !== 'http:') return;
+  if (isLoopbackHost(url.hostname)) return;
+  if (warnedInsecureUpstreams.has(name)) return;
+  warnedInsecureUpstreams.add(name);
+  console.error(
+    `[router] WARNING: upstream '${name}' is configured with http: to a non-loopback host (${url.hostname}). ` +
+    `Its API key will be sent in cleartext. Use https: unless this upstream is trusted and local-only.`
+  );
+}
+
 // Resolve an upstream's connection details. `passthrough` upstreams need no key —
 // the client's own credentials (e.g. your Claude subscription token) are forwarded as-is.
 function upstreamConn(name) {
@@ -43,12 +81,15 @@ function upstreamConn(name) {
     throw new Error(`Unknown auth mode '${u.auth}' for upstream '${name}' (expected one of: ${[...KNOWN_AUTH_MODES].join(', ')})`);
   }
   const baseUrl = process.env[u.baseUrlEnv] || u.defaultBaseUrl;
+  const url = new URL(baseUrl);
+  assertSupportedProtocol(url, name);
+  warnIfInsecureUpstream(url, name, u.auth);
   let key = null;
   if (u.auth !== 'passthrough') {
     key = process.env[u.keyEnv];
     if (!key) throw new Error(`Missing API key env ${u.keyEnv} for upstream '${name}'`);
   }
-  return { url: new URL(baseUrl), key, auth: u.auth };
+  return { url, key, auth: u.auth };
 }
 
 // passthrough: leave the client's credentials intact. bearer/x-api-key: replace them.
@@ -96,9 +137,12 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
   applyAuth(headers, conn);
 
   const upstreamPath = conn.url.pathname.replace(/\/$/, '') + req.url;
-  // https.request() accepts the `protocol` option and handles both http:// and
-  // https:// upstreams; http.request() rejects 'https:' outright. Use the same
-  // request module for both protocols.
+  // http.request() rejects a 'https:' protocol option outright, and
+  // https.request() rejects 'http:' outright — each module only speaks its
+  // own scheme. conn.url.protocol is validated at the upstreamConn()
+  // boundary (assertSupportedProtocol) to be one of the two, so this picks
+  // the matching transport rather than hardcoding one.
+  const transport = conn.url.protocol === 'http:' ? http : https;
   // `done` is shared by every exit path (upstream end, upstream error, client
   // close). Exactly one of them may call logRes + res.end for a given request.
   let done = false;
@@ -128,9 +172,8 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       thinking_tokens: fields.usage?.output_tokens_details?.thinking_tokens ?? 0,
     });
   };
-  const upstreamReq = https.request(
+  const upstreamReq = transport.request(
     {
-      protocol: conn.url.protocol,
       hostname: conn.url.hostname,
       port: conn.url.port || (conn.url.protocol === 'http:' ? 80 : 443),
       method: req.method,
@@ -341,10 +384,14 @@ export function createServer() {
   return http.createServer(handleRequest);
 }
 
-// Wire graceful SIGTERM shutdown. The router stops accepting new
-// connections, lets in-flight streaming responses finish, and only exits
-// once every tracked client socket has closed. A second SIGTERM during
-// the drain destroys the remaining sockets and exits immediately.
+// Wire graceful shutdown on SIGTERM and SIGINT through a single
+// signal-aware state machine. The router stops accepting new connections,
+// lets in-flight streaming responses finish, and only exits once every
+// tracked client socket has closed. Whichever signal arrives first starts
+// the drain; any subsequent signal — including a different one from the
+// first (e.g. SIGTERM then SIGINT) — forces the remaining sockets closed
+// and exits immediately. The log lines always name the signal that
+// actually arrived rather than assuming SIGTERM.
 //
 // Exported for tests. The production bottom-of-module call passes the
 // real `process.exit`; tests inject a stub so they don't kill the runner.
@@ -368,16 +415,19 @@ export function installShutdown(srv, { exit = process.exit } = {}) {
     });
   });
 
-  const onSigterm = () => {
+  // Test seam: driven directly by tests (and by the process signal
+  // listeners below in production) so tests never need to emit a real
+  // process signal to exercise the state machine.
+  const onSignal = (signal) => {
     if (shuttingDown) {
-      console.log(`[shutdown] received second SIGTERM, forcing immediate shutdown (${openConnections.size} connection(s) still open)`);
+      console.log(`[shutdown] received second signal (${signal}), forcing immediate shutdown (${openConnections.size} connection(s) still open)`);
       for (const s of openConnections) s.destroy();
       exit(exitCode);
       return;
     }
     shuttingDown = true;
     routerShuttingDown = true;
-    console.log(`[shutdown] received SIGTERM, beginning graceful shutdown (${openConnections.size} open connection(s))`);
+    console.log(`[shutdown] received ${signal}, beginning graceful shutdown (${openConnections.size} open connection(s))`);
     srv.close((err) => {
       if (err) {
         exitCode = 1;
@@ -387,9 +437,28 @@ export function installShutdown(srv, { exit = process.exit } = {}) {
     });
   };
 
+  const onSigterm = () => onSignal('SIGTERM');
+  const onSigint = () => onSignal('SIGINT');
   process.on('SIGTERM', onSigterm);
+  process.on('SIGINT', onSigint);
 
-  return { openConnections, get shuttingDown() { return shuttingDown; }, onSigterm };
+  return {
+    openConnections,
+    get shuttingDown() { return shuttingDown; },
+    onSignal,
+    // Test-only seam: detaches the two process-level listeners this call
+    // installed. Production never calls this — the real process is meant
+    // to keep exactly one SIGTERM/SIGINT listener pair for its lifetime.
+    // Tests call installShutdown() repeatedly (once per test), and without
+    // this, each call would leave its listeners on `process` permanently,
+    // both accumulating (eventually tripping Node's MaxListeners warning)
+    // and leaving stale onSignal closures live for the rest of the run —
+    // including ones bound to an already-closed test server.
+    uninstall() {
+      process.removeListener('SIGTERM', onSigterm);
+      process.removeListener('SIGINT', onSigint);
+    },
+  };
 }
 
 // Entry-point guard: only bind the port and wire SIGTERM when this module
