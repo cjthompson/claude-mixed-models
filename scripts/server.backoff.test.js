@@ -125,7 +125,31 @@ test('healthy run followed by immediate crash: attempt 1, not 2', () => {
   assert.equal(crash.delayMs, 1000);
 });
 
-// 8. Per-script counters are independent.
+// 9. A crash (non-zero code) after a long healthy run must still respawn —
+//    this is the production bug: the batcher lived 15.9 days then crashed
+//    with a disk I/O error, and the old logic silently treated that as a
+//    healthy 'noop' and never respawned it.
+test('crash after long healthy run: still respawns at attempt 1, not noop', () => {
+  const { backoff, log } = setup();
+  backoff.onStart('batcher.mjs');
+  const action = backoff.onExit('batcher.mjs', { code: 1, signal: null, livedMs: 1_374_192_000 });
+  assert.equal(action.action, 'respawn');
+  assert.equal(action.attempt, 1);
+  assert.equal(action.delayMs, 1000);
+  assert.match(log[log.length - 1], /retry 1\/10/);
+});
+
+// 10. A signal-killed child after a long healthy run also respawns (not
+//     a clean exit just because it lived a while).
+test('signal kill after long healthy run: still respawns, not noop', () => {
+  const { backoff } = setup();
+  backoff.onStart('router.js');
+  const action = backoff.onExit('router.js', { code: null, signal: 'SIGSEGV', livedMs: 6000 });
+  assert.equal(action.action, 'respawn');
+  assert.equal(action.attempt, 1);
+});
+
+// 11. Per-script counters are independent.
 test('per-script counters: router crash does not advance batcher counter', () => {
   const { backoff, log } = setup();
   backoff.onStart('router.js');

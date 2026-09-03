@@ -4,6 +4,7 @@
     "minimax": { "baseUrlEnv": "MINIMAX_BASE_URL", "defaultBaseUrl": "https://api.minimax.io/anthropic", "keyEnv": "MINIMAX_API_KEY", "auth": "bearer" }
   },
   "routes": {
+    "claude-haiku-4-5-20251001": { "upstream": "minimax", "realModel": "MiniMax-M3" },
     "minimax": { "upstream": "minimax", "realModel": "MiniMax-M3" },
     "minimax-m2.7": { "upstream": "minimax", "realModel": "MiniMax-M2.7" }
   }

@@ -204,7 +204,7 @@ document.getElementById('range').addEventListener('change', () => {
   localStorage.setItem('stats-range', document.getElementById('range').value);
   refresh();
 });
-const VALID_RANGES = ['24h', '7d', '30d', 'all'];
+const VALID_RANGES = ['1h', '5h', '24h', '7d', '30d', 'all'];
 const savedRange = localStorage.getItem('stats-range');
 if (savedRange && VALID_RANGES.includes(savedRange)) {
   document.getElementById('range').value = savedRange;

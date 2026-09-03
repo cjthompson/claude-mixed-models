@@ -16,8 +16,16 @@
 //                leave the rest of the stack running silently while the user
 //                wonders why the dashboard is empty. launchd's KeepAlive
 //                will restart the whole orchestrator.
-//   'noop'     — child lived long enough to count as healthy. Counter resets
-//                on the *next* onStart, so a fast second crash counts.
+//   'noop'     — child exited cleanly (code 0, no signal) after living long
+//                enough to count as healthy — a script that finished on its
+//                own, on purpose. Counter resets on the *next* onStart, so a
+//                fast second crash counts.
+//
+// A long healthy run followed by a *crash* (non-zero code or a signal) is
+// NOT a 'noop': it always gets a 'respawn' (or 'give-up'), just like a fast
+// crash — a service that dies after 16 healthy days is still a crash, not
+// an intentional exit. The healthy-run/crash combo only resets the retry
+// counter to attempt 1 instead of inheriting a stale streak.
 //
 // `log` defaults to console.error so launchd captures messages into
 // stats/server.err.log alongside the orchestrator's own stderr.
@@ -54,13 +62,16 @@ export function createBackoff(opts = {}) {
   function onExit(script, { code, signal, now = Date.now(), livedMs } = {}) {
     const s = get(script);
     const lived = livedMs ?? (s.startedAt ? now - s.startedAt : 0);
+    const healthy = lived >= healthyMs;
+    const clean = code === 0 && signal === null;
 
-    if (lived >= healthyMs) {
+    // Reset at the healthy boundary regardless of clean-vs-crash: a fast
+    // crash right after a long healthy run should count as attempt 1, not
+    // inherit a streak from weeks ago.
+    if (healthy) s.attempt = 0;
+
+    if (healthy && clean) {
       log(`[stats] ${script} exited (code=${code} signal=${signal}, lived=${Math.round(lived / 1000)}s, healthy) — resetting retry counter`);
-      // Reset only here at the boundary; the next onStart confirms a fresh
-      // run is in flight. A healthy run that gets immediately replaced by
-      // a fast crash will see attempt=1, not 2.
-      s.attempt = 0;
       return { action: 'noop' };
     }
 
