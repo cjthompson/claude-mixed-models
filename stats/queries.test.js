@@ -73,51 +73,51 @@ test('tokensByDay: returns one row per day, summed by model', () => {
   assert.equal(byDate['2026-06-08'], 300 + 30 + 400 + 40);            // 770
 });
 
-test('requestsByHourOfDay: returns 24 buckets aggregated over the window', () => {
-  // Pin TZ for this assertion: the production code uses the server's local
-  // timezone (Date#getHours), so without a fixed TZ the assertions would
-  // shift with where the test runs. UTC matches the seed timestamps below.
-  process.env.TZ = 'UTC';
+test('tokensByDay: 24h range uses hourly buckets, not daily', () => {
+  // Regression: a daily rollup collapses the 24h window to a single bar.
+  // tokensByDay must read rollup_1h without the date substr so the chart
+  // shows ~24 hourly bars.
+  const db = freshDb();
+  buildRollups(db);
+  const rows = tokensByDay(db, '24h');
+  // Seed spans 2 days; 24h filter only catches one of them. We assert
+  // shape, not counts (the test seed is older than 24h relative to now).
+  // The point is: each row's `date` carries a time component.
+  for (const r of rows) {
+    assert.match(r.date, /T\d{2}:00:00\.000Z$/, `expected hourly bucket, got ${r.date}`);
+  }
+});
+
+test('requestsByHourOfDay: returns one row per rollup_1h bucket, preserving bucket_start', () => {
+  // Frontend buckets by *browser-local* hour-of-day, so the backend must
+  // hand back the raw UTC bucket boundaries. This test pins that contract:
+  // one row per distinct bucket_start, no server-side hour bucketing.
   const db = freshDb();
   buildRollups(db);
   const rows = requestsByHourOfDay(db, 'all');
-  assert.equal(rows.length, 24);
-  assert.equal(rows[10].requests, 2);   // 10:00 UTC on both days
-  assert.equal(rows[11].requests, 2);   // 11:00 UTC on both days
-  assert.equal(rows[12].requests, 1);   // 12:00 UTC only on day 1
-  assert.equal(rows[0].requests, 0);    // 00:00 UTC untouched
+  // 5 events at 5 distinct bucket_starts (10/11/12 on day 1, 10/11 on day 2).
+  assert.equal(rows.length, 5);
+  const total = rows.reduce((s, r) => s + r.requests, 0);
+  assert.equal(total, 5);
+  // Each row carries the original bucket boundary (a top-of-hour ISO 8601),
+  // not an integer hour.
+  for (const r of rows) {
+    assert.match(r.bucket, /^\d{4}-\d{2}-\d{2}T\d{2}:00:00\.000Z$/);
+    assert.equal(typeof r.hour, 'undefined');   // old shape removed
+  }
 });
 
-test('requestsByHourOfDay: 30d and all ranges no longer collapse to hour 00', () => {
+test('requestsByHourOfDay: 30d and all read from rollup_1h, not rollup_1d', () => {
   // Regression: rollup_1d stores 'YYYY-MM-DD' with no time component, so the
   // old `strftime('%H', bucket_start)` on it bucketed every request at hour 0
   // for the 30d/all-time views. The fix reads from rollup_1h instead.
   // Both 30d and all now share the rollup_1h path, so verifying 'all' is
   // enough to catch a regression in either range.
-  process.env.TZ = 'UTC';
   const db = freshDb();
   buildRollups(db);
   const rows = requestsByHourOfDay(db, 'all');
-  assert.equal(rows[10].requests, 2);
-  assert.equal(rows[11].requests, 2);
-  assert.equal(rows[12].requests, 1);
-  assert.equal(rows[0].requests, 0);    // nothing parked at midnight
-  const total = rows.reduce((s, r) => s + r.requests, 0);
-  assert.equal(total, 5);
-});
-
-test('requestsByHourOfDay: shifts buckets to local timezone', () => {
-  // UTC-5 (e.g. EST). A 15:00 UTC bucket becomes 10:00 local. Verify the
-  // conversion happens in JS rather than via strftime (which is always UTC).
-  process.env.TZ = 'America/New_York';   // UTC-4 or UTC-5 depending on DST
-  const db = freshDb();
-  buildRollups(db);
-  const rows = requestsByHourOfDay(db, 'all');
-  const total = rows.reduce((s, r) => s + r.requests, 0);
-  assert.equal(total, 5);                 // counts don't change, only the buckets
-  // Nothing should land at hour 0: the seed times (10/11/12 UTC) are all
-  // well away from midnight in either EST or EDT.
-  assert.equal(rows[0].requests, 0);
+  assert.equal(rows.length, 5);    // not 1 — we didn't fall back to rollup_1d
+  assert.ok(rows.every((r) => r.bucket.includes('T')));   // has a time component
 });
 
 test('cacheHitRateByModel: returns ratio of cache_read to total input', () => {

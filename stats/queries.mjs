@@ -37,7 +37,12 @@ function bindRange(range, ...rest) {
   return t ? [...rest, t] : rest;
 }
 
-// Stacked bar chart, 30 days, by model. The rollup already aggregates by day.
+// Stacked bar chart of token usage. Grain matches the selected range:
+//   1h / 5h → 5-minute buckets (so short ranges show fine-grained bars)
+//   24h     → hour buckets (a daily rollup would collapse to a single bar)
+//   7d/30d/all → day buckets
+// The bucket key is returned as `date` regardless of grain; the frontend
+// slices it for display (HH:MM for sub-day, YYYY-MM-DD for daily).
 export function tokensByDay(db, range = '30d') {
   if (range === '30d' || range === 'all') {
     return db.prepare(`
@@ -48,7 +53,6 @@ export function tokensByDay(db, range = '30d') {
     `).all();
   }
   if (range === '1h' || range === '5h') {
-    // Return per-5m buckets so the chart shows fine-grained resolution.
     return db.prepare(`
       SELECT bucket_start AS date, model, SUM(input_tokens + output_tokens) AS tokens
       FROM rollup_5m
@@ -57,6 +61,17 @@ export function tokensByDay(db, range = '30d') {
       ORDER BY date, model
     `).all(...bindRange(range));
   }
+  if (range === '24h') {
+    // Hourly granularity: otherwise a daily grouping collapses to one bar.
+    return db.prepare(`
+      SELECT bucket_start AS date, model, SUM(input_tokens + output_tokens) AS tokens
+      FROM rollup_1h
+      WHERE ${withRange(range, '1=1', 'bucket_start')}
+      GROUP BY date, model
+      ORDER BY date, model
+    `).all(...bindRange(range));
+  }
+  // 7d: daily grain.
   return db.prepare(`
     SELECT substr(bucket_start, 1, 10) AS date, model, SUM(input_tokens + output_tokens) AS tokens
     FROM rollup_1h
@@ -66,23 +81,17 @@ export function tokensByDay(db, range = '30d') {
   `).all(...bindRange(range));
 }
 
-// 24-bucket bar chart of requests by hour-of-day, aggregated over the window.
-// Always reads rollup_1h: rollup_1d stores 'YYYY-MM-DD' with no time component,
-// so strftime('%H', …) on it collapses every row to hour 00. Hour-of-day is
-// computed in JavaScript using the server's local timezone (matches how
-// rangeThreshold already slices 'today').
+// Per-hour request counts over the window, one row per rollup_1h bucket.
+// The frontend buckets these by *browser-local* hour-of-day so the chart
+// reflects each viewer's timezone (a server-UTC deployment would otherwise
+// show the wrong hours for everyone not on UTC).
 export function requestsByHourOfDay(db, range = '7d') {
-  const rows = db.prepare(`
+  return db.prepare(`
     SELECT bucket_start, SUM(requests) AS requests
     FROM rollup_1h
     WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY bucket_start
-  `).all(...bindRange(range));
-  const byHour = new Array(24).fill(0);
-  for (const { bucket_start, requests } of rows) {
-    byHour[new Date(bucket_start).getHours()] += Number(requests);
-  }
-  return byHour.map((requests, hour) => ({ hour, requests }));
+  `).all(...bindRange(range)).map((r) => ({ bucket: r.bucket_start, requests: Number(r.requests) }));
 }
 
 // Cache hit rate: cache_read / (input + cache_read + cache_write) per model.

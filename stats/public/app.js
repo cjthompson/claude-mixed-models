@@ -89,25 +89,52 @@ async function refresh() {
     ${thinkingLine}
   `;
 
-  // Tokens per day/bucket (stacked by model)
+  // Tokens per bucket (stacked by model). Title + label format depend on
+  // the bucket grain: 5m for sub-hour ranges, hour for 24h, day otherwise.
   const is5mRange = range === '1h' || range === '5h';
-  document.querySelector('.card--wide h2').textContent = is5mRange ? 'Tokens per 5m' : 'Tokens per day';
+  const isHourRange = range === '24h';
+  const title = is5mRange ? 'Tokens per 5m'
+              : isHourRange ? 'Tokens per hour'
+              : 'Tokens per day';
+  document.querySelector('.card--wide h2').textContent = title;
   const dayMap = {};
   for (const r of data.tokensByDay ?? []) {
     const cm = canonicalModel(r.model);
     const day = dayMap[r.date] ??= {};
     day[cm] = (day[cm] ?? 0) + r.tokens;
   }
+  // 24h: rollup_1h only emits rows for buckets with traffic, but the chart
+  // should always show all 24 hourly bars so empty hours are visible.
+  // Synthesize the missing buckets here (UTC top-of-hour boundaries match
+  // rollup_1h bucket_start).
+  if (isHourRange) {
+    const now = new Date();
+    now.setUTCMinutes(0, 0, 0);
+    for (let i = 23; i >= 0; i--) {
+      const d = new Date(now);
+      d.setUTCHours(d.getUTCHours() - i);
+      const iso = d.toISOString().replace(/\.\d{3}Z$/, '.000Z');
+      if (!dayMap[iso]) dayMap[iso] = {};
+    }
+  }
   const days = Object.keys(dayMap).sort();
-  // For 5m-resolution ranges, format ISO timestamps as HH:MM for readability.
-  const dayLabels = is5mRange ? days.map((d) => d.slice(11, 16)) : days;
-  const labelKey = is5mRange ? Object.fromEntries(dayLabels.map((l, i) => [l, days[i]])) : null;
+  // For sub-day ranges, format ISO timestamps as HH:MM for readability.
+  const isSubDay = is5mRange || isHourRange;
+  const dayLabels = isSubDay ? days.map((d) => d.slice(11, 16)) : days;
+  const labelKey = isSubDay ? Object.fromEntries(dayLabels.map((l, i) => [l, days[i]])) : null;
   const models = [...new Set((data.tokensByDay ?? []).map((r) => canonicalModel(r.model)))].sort();
   renderStackedBar('chart-tokens', dayLabels, models, (label, model) => dayMap[labelKey ? labelKey[label] : label]?.[model] ?? 0);
 
-  // Requests by hour-of-day
-  renderBars('chart-hours', (data.requestsByHourOfDay ?? []).map((r) => String(r.hour).padStart(2, '0')),
-    (data.requestsByHourOfDay ?? []).map((r) => r.requests));
+  // Requests by hour-of-day: server returns per-bucket UTC counts; we
+  // group them by *browser-local* hour-of-day so the chart reflects the
+  // viewer's timezone rather than the server's.
+  const localHourTotals = new Array(24).fill(0);
+  for (const { bucket, requests } of data.requestsByHourOfDay ?? []) {
+    localHourTotals[new Date(bucket).getHours()] += requests;
+  }
+  renderBars('chart-hours',
+    localHourTotals.map((_, h) => String(h).padStart(2, '0')),
+    localHourTotals);
 
   // Cache hit rate (percent)
   const cacheRows = [];
