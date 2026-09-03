@@ -220,13 +220,41 @@ function fullRefreshGrain(db, grain) {
   return seen.size;
 }
 
+// runOnce() is synchronous and transactional, so a signal can only be
+// delivered between ticks (never mid-commit). On a stop request, run one
+// last flush before exiting so events appended since the previous tick are
+// saved to the DB rather than left pending in the JSONL until the process
+// next starts — still far faster than waiting for the 10s safety timer.
+// Guards against a duplicate signal (e.g. SIGTERM then SIGINT) re-entering
+// the flush. Exported (and the flush/exit functions injectable) so tests can
+// drive the handler directly instead of sending real process signals.
+export function installShutdown({ runOnceFn = runOnce, exit = process.exit } = {}) {
+  let shuttingDown = false;
+  const onShutdownSignal = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    return runOnceFn()
+      .catch((err) => console.error('[stats-batcher] final flush failed:', err.message))
+      .finally(() => exit(0));
+  };
+  process.on('SIGTERM', onShutdownSignal);
+  process.on('SIGINT',  onShutdownSignal);
+  return {
+    onShutdownSignal,
+    get shuttingDown() { return shuttingDown; },
+    // Test-only seam: each test calls installShutdown() fresh, so without
+    // this every test run would leave another pair of listeners on
+    // `process`, accumulating toward Node's MaxListeners warning.
+    uninstall() {
+      process.removeListener('SIGTERM', onShutdownSignal);
+      process.removeListener('SIGINT', onShutdownSignal);
+    },
+  };
+}
+
 // Long-running mode: fs.watch with a 10s safety timer. Re-arms on every flush.
 async function mainLoop() {
-  // runOnce() is synchronous and transactional, so a signal can only be
-  // delivered between ticks (never mid-commit). Exit promptly so the
-  // orchestrator's graceful shutdown doesn't have to wait for the 10s timer.
-  process.on('SIGTERM', () => process.exit(0));
-  process.on('SIGINT',  () => process.exit(0));
+  installShutdown();
 
   const tick = async () => {
     try {

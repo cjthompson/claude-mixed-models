@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // We import the batcher's runOnce() so we can drive a single pass without spawning a process.
-import { runOnce } from './batcher.mjs';
+import { runOnce, installShutdown } from './batcher.mjs';
 
 function freshPaths() {
   const dir = mkdtempSync(join(tmpdir(), 'batcher-test-'));
@@ -194,4 +194,59 @@ test('runOnce: applyMigrations adds new columns to a pre-existing DB and is idem
   } finally {
     cleanup();
   }
+});
+
+test('installShutdown: flushes pending events via runOnce before exiting', async () => {
+  const calls = [];
+  let resolveRunOnce;
+  const runOnceFn = () => new Promise((resolve) => {
+    resolveRunOnce = resolve;
+    calls.push('runOnce');
+  });
+  const exit = (code) => calls.push(`exit(${code})`);
+
+  const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
+  try {
+    const pending = onShutdownSignal();
+    // exit() must not fire until the flush settles.
+    assert.deepEqual(calls, ['runOnce']);
+    resolveRunOnce({ inserted: 1, truncated: true });
+    await pending;
+    assert.deepEqual(calls, ['runOnce', 'exit(0)']);
+  } finally {
+    uninstall();
+  }
+});
+
+test('installShutdown: a duplicate signal does not re-enter the flush', async () => {
+  let runOnceCalls = 0;
+  const runOnceFn = () => { runOnceCalls++; return Promise.resolve({ inserted: 0, truncated: false }); };
+  const exitCalls = [];
+  const exit = (code) => exitCalls.push(code);
+
+  const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
+  try {
+    await onShutdownSignal();
+    await onShutdownSignal();
+    assert.equal(runOnceCalls, 1);
+    assert.deepEqual(exitCalls, [0]);
+  } finally {
+    uninstall();
+  }
+});
+
+test('installShutdown: a flush failure still exits(0) rather than hanging', async () => {
+  const runOnceFn = () => Promise.reject(new Error('disk full'));
+  const exitCalls = [];
+  const exit = (code) => exitCalls.push(code);
+  const originalError = console.error;
+  console.error = () => {};
+  const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
+  try {
+    await onShutdownSignal();
+  } finally {
+    console.error = originalError;
+    uninstall();
+  }
+  assert.deepEqual(exitCalls, [0]);
 });
