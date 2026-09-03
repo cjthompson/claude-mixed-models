@@ -67,16 +67,22 @@ export function tokensByDay(db, range = '30d') {
 }
 
 // 24-bucket bar chart of requests by hour-of-day, aggregated over the window.
+// Always reads rollup_1h: rollup_1d stores 'YYYY-MM-DD' with no time component,
+// so strftime('%H', …) on it collapses every row to hour 00. Hour-of-day is
+// computed in JavaScript using the server's local timezone (matches how
+// rangeThreshold already slices 'today').
 export function requestsByHourOfDay(db, range = '7d') {
   const rows = db.prepare(`
-    SELECT strftime('%H', bucket_start) AS hour, SUM(requests) AS requests
-    FROM ${rollupTable(range)}
+    SELECT bucket_start, SUM(requests) AS requests
+    FROM rollup_1h
     WHERE ${withRange(range, '1=1', 'bucket_start')}
-    GROUP BY hour
+    GROUP BY bucket_start
   `).all(...bindRange(range));
-  // Fill missing hours with 0 so the chart has 24 bars.
-  const byHour = Object.fromEntries(rows.map((r) => [Number(r.hour), Number(r.requests)]));
-  return Array.from({ length: 24 }, (_, h) => ({ hour: h, requests: byHour[h] ?? 0 }));
+  const byHour = new Array(24).fill(0);
+  for (const { bucket_start, requests } of rows) {
+    byHour[new Date(bucket_start).getHours()] += Number(requests);
+  }
+  return byHour.map((requests, hour) => ({ hour, requests }));
 }
 
 // Cache hit rate: cache_read / (input + cache_read + cache_write) per model.
