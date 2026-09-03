@@ -204,7 +204,8 @@ test('installShutdown: flushes pending events via runOnce before exiting', async
     calls.push('runOnce');
   });
   const exit = (code) => calls.push(`exit(${code})`);
-
+  const originalLog = console.log;
+  console.log = () => {};   // silence success log during this ordering test
   const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
   try {
     const pending = onShutdownSignal();
@@ -214,6 +215,7 @@ test('installShutdown: flushes pending events via runOnce before exiting', async
     await pending;
     assert.deepEqual(calls, ['runOnce', 'exit(0)']);
   } finally {
+    console.log = originalLog;
     uninstall();
   }
 });
@@ -223,7 +225,8 @@ test('installShutdown: a duplicate signal does not re-enter the flush', async ()
   const runOnceFn = () => { runOnceCalls++; return Promise.resolve({ inserted: 0, truncated: false }); };
   const exitCalls = [];
   const exit = (code) => exitCalls.push(code);
-
+  const originalLog = console.log;
+  console.log = () => {};   // silence no-flush log during this counter test
   const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
   try {
     await onShutdownSignal();
@@ -231,6 +234,7 @@ test('installShutdown: a duplicate signal does not re-enter the flush', async ()
     assert.equal(runOnceCalls, 1);
     assert.deepEqual(exitCalls, [0]);
   } finally {
+    console.log = originalLog;
     uninstall();
   }
 });
@@ -249,4 +253,56 @@ test('installShutdown: a flush failure still exits(0) rather than hanging', asyn
     uninstall();
   }
   assert.deepEqual(exitCalls, [0]);
+});
+
+test('installShutdown: logs a no-flush-needed line when runOnce inserts zero events', async () => {
+  const runOnceFn = () => Promise.resolve({ inserted: 0, truncated: false });
+  const exit = () => {};
+  const lines = [];
+  const originalLog = console.log;
+  console.log = (msg) => lines.push(msg);
+  const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
+  try {
+    await onShutdownSignal();
+  } finally {
+    console.log = originalLog;
+    uninstall();
+  }
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /\[stats-batcher\] shutdown: no pending events to flush/);
+});
+
+test('installShutdown: logs a success line with the inserted count when runOnce flushes events', async () => {
+  const runOnceFn = () => Promise.resolve({ inserted: 42, truncated: true });
+  const exit = () => {};
+  const lines = [];
+  const originalLog = console.log;
+  console.log = (msg) => lines.push(msg);
+  const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
+  try {
+    await onShutdownSignal();
+  } finally {
+    console.log = originalLog;
+    uninstall();
+  }
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /\[stats-batcher\] shutdown: flushed 42 event\(s\) to DB/);
+});
+
+test('installShutdown: logs a failure line via console.error when runOnce rejects', async () => {
+  const runOnceFn = () => Promise.reject(new Error('disk full'));
+  const exit = () => {};
+  const lines = [];
+  const originalError = console.error;
+  console.error = (...args) => lines.push(args.join(' '));
+  const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
+  try {
+    await onShutdownSignal();
+  } finally {
+    console.error = originalError;
+    uninstall();
+  }
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /\[stats-batcher\] shutdown: final flush failed:/);
+  assert.match(lines[0], /disk full/);
 });

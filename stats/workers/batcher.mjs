@@ -226,7 +226,9 @@ function fullRefreshGrain(db, grain) {
 // saved to the DB rather than left pending in the JSONL until the process
 // next starts — still far faster than waiting for the 10s safety timer.
 // Guards against a duplicate signal (e.g. SIGTERM then SIGINT) re-entering
-// the flush. Exported (and the flush/exit functions injectable) so tests can
+// the flush. Always emits a final log line so the operator can tell from
+// shutdown output whether no flush was needed, the flush succeeded, or it
+// failed. Exported (and the flush/exit functions injectable) so tests can
 // drive the handler directly instead of sending real process signals.
 export function installShutdown({ runOnceFn = runOnce, exit = process.exit } = {}) {
   let shuttingDown = false;
@@ -234,7 +236,15 @@ export function installShutdown({ runOnceFn = runOnce, exit = process.exit } = {
     if (shuttingDown) return;
     shuttingDown = true;
     return runOnceFn()
-      .catch((err) => console.error('[stats-batcher] final flush failed:', err.message))
+      .then((result) => {
+        const inserted = result?.inserted ?? 0;
+        if (inserted === 0) {
+          console.log('[stats-batcher] shutdown: no pending events to flush');
+        } else {
+          console.log(`[stats-batcher] shutdown: flushed ${inserted} event(s) to DB`);
+        }
+      })
+      .catch((err) => console.error('[stats-batcher] shutdown: final flush failed:', err.message))
       .finally(() => exit(0));
   };
   process.on('SIGTERM', onShutdownSignal);
