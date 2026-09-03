@@ -126,6 +126,19 @@ export function applyToolCompat(body, upstreamName) {
   if (patched > 0) console.error(`[tool-compat] injected input_schema on ${patched} tool entry/entries for ${upstreamName}`);
 }
 
+// Force thinking mode on for every MiniMax request. MiniMax-M3 defaults to
+// `disabled` when the `thinking` field is omitted (unlike Claude, which the
+// client already drives explicitly); M2.x models ignore the field entirely
+// since thinking can't be disabled for them there. Overwrite whatever the
+// client sent — including an explicit `disabled` — so MiniMax traffic always
+// reasons, regardless of what the caller (built for Claude's own thinking
+// knobs) put in the request. No-op for passthrough/Anthropic upstreams.
+export function applyThinkingCompat(body, upstreamName) {
+  if (upstreamName !== 'minimax') return;
+  if (!body || typeof body !== 'object') return;
+  body.thinking = { type: 'adaptive' };
+}
+
 export function forward(req, res, conn, outBody, { id, t0, session, model, realModel, reqBody }) {
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
@@ -345,6 +358,7 @@ export function handleRequest(req, res) {
         realModel = route.realModel;
         body.model = route.realModel;
         applyToolCompat(body, route.upstream);
+        applyThinkingCompat(body, route.upstream);
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
       } else {
         // Unmapped model → ride the default upstream untouched. For a Claude

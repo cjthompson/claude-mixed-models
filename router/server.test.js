@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  applyAuth, applyToolCompat, forward, handleRequest,
+  applyAuth, applyToolCompat, applyThinkingCompat, forward, handleRequest,
   installShutdown, KNOWN_AUTH_MODES, __setRouterShuttingDownForTest,
   assertSupportedProtocol, warnIfInsecureUpstream,
 } from './server.js';
@@ -193,6 +193,31 @@ test('applyToolCompat: tool entries that already have input_schema are left alon
   const before = JSON.stringify(body);
   applyToolCompat(body, 'minimax');
   assert.equal(JSON.stringify(body), before);
+});
+
+// --- applyThinkingCompat -----------------------------------------------------
+// MiniMax-M3 defaults thinking to `disabled` unless the request sets
+// `thinking: { type: "adaptive" }`; M2.x models can't turn it off at all.
+// The shim forces `adaptive` on every MiniMax request so reasoning is always
+// on, overriding whatever the client sent. Keyed on upstream name, like
+// applyToolCompat, so Anthropic/passthrough traffic is untouched.
+
+test('applyThinkingCompat: minimax gets thinking forced to adaptive', () => {
+  const body = { model: 'minimax', messages: [] };
+  applyThinkingCompat(body, 'minimax');
+  assert.deepEqual(body.thinking, { type: 'adaptive' });
+});
+
+test('applyThinkingCompat: overrides an explicit disabled from the client', () => {
+  const body = { model: 'minimax', thinking: { type: 'disabled' }, messages: [] };
+  applyThinkingCompat(body, 'minimax');
+  assert.deepEqual(body.thinking, { type: 'adaptive' });
+});
+
+test('applyThinkingCompat: anthropic upstream is a no-op', () => {
+  const body = { model: 'claude-opus-4-7', messages: [] };
+  applyThinkingCompat(body, 'anthropic');
+  assert.equal(body.thinking, undefined);
 });
 
 // --- body-guard ------------------------------------------------------------
