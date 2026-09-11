@@ -117,13 +117,26 @@ async function refresh() {
       if (!dayMap[iso]) dayMap[iso] = {};
     }
   }
-  const days = Object.keys(dayMap).sort();
-  // For sub-day ranges, format ISO timestamps as HH:MM for readability.
+  // For sub-day ranges, format ISO timestamps as HH:MM in the viewer's
+  // local timezone. We aggregate into local-time buckets so DST fall-back
+  // collisions (two UTC buckets an hour apart that format to the same
+  // HH:MM) sum instead of overwriting.
   const isSubDay = is5mRange || isHourRange;
-  const dayLabels = isSubDay ? days.map((d) => d.slice(11, 16)) : days;
-  const labelKey = isSubDay ? Object.fromEntries(dayLabels.map((l, i) => [l, days[i]])) : null;
+  const fmtLocal = (iso) => {
+    const dt = new Date(iso);
+    return `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
+  };
+  const dayLabels = [];
+  const localMap = {}; // local label -> { model -> tokens }
+  for (const iso of Object.keys(dayMap).sort()) {
+    const label = isSubDay ? fmtLocal(iso) : iso;
+    if (!localMap[label]) { localMap[label] = {}; dayLabels.push(label); }
+    for (const [model, tokens] of Object.entries(dayMap[iso])) {
+      localMap[label][model] = (localMap[label][model] ?? 0) + tokens;
+    }
+  }
   const models = [...new Set((data.tokensByDay ?? []).map((r) => canonicalModel(r.model)))].sort();
-  renderStackedBar('chart-tokens', dayLabels, models, (label, model) => dayMap[labelKey ? labelKey[label] : label]?.[model] ?? 0);
+  renderStackedBar('chart-tokens', dayLabels, models, (label, model) => localMap[label]?.[model] ?? 0);
 
   // Requests by hour-of-day: server returns per-bucket UTC counts; we
   // group them by *browser-local* hour-of-day so the chart reflects the
