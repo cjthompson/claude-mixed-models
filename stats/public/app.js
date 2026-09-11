@@ -26,7 +26,15 @@ const MODEL_ALIASES = {
   'claude-opus':              'Opus',
   'claude-opus-4-7':          'Opus',
   'claude-opus-4-8':          'Opus',
+  'claude-opus-5':            'Opus 5',
   'opus':                     'Opus',
+  // Opus/Sonnet 5 variants
+  'claude-sonnet-5':          'Sonnet 5',
+  // Codex model variants
+  'gpt-5.6-luna':             'GPT-5.6 Luna',
+  'gpt-5.6-terra':            'GPT-5.6 Terra',
+  'gpt-5.6-sol':              'GPT-5.6 Sol',
+  'gpt-6-astra':              'GPT-6 Astra',
   // MiniMax variants
   'minimax':                  'MiniMax',
   'minimax-m2.7':             'MiniMax M2.7',
