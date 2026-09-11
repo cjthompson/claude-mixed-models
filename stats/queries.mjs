@@ -46,7 +46,8 @@ function bindRange(range, ...rest) {
 export function tokensByDay(db, range = '30d') {
   if (range === '30d' || range === 'all') {
     return db.prepare(`
-      SELECT bucket_start AS date, model, SUM(input_tokens + output_tokens) AS tokens
+      SELECT bucket_start AS date, model,
+             SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
       FROM rollup_1d
       GROUP BY date, model
       ORDER BY date, model
@@ -54,7 +55,8 @@ export function tokensByDay(db, range = '30d') {
   }
   if (range === '1h' || range === '5h') {
     return db.prepare(`
-      SELECT bucket_start AS date, model, SUM(input_tokens + output_tokens) AS tokens
+      SELECT bucket_start AS date, model,
+             SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
       FROM rollup_5m
       WHERE ${withRange(range, '1=1', 'bucket_start')}
       GROUP BY date, model
@@ -64,7 +66,8 @@ export function tokensByDay(db, range = '30d') {
   if (range === '24h') {
     // Hourly granularity: otherwise a daily grouping collapses to one bar.
     return db.prepare(`
-      SELECT bucket_start AS date, model, SUM(input_tokens + output_tokens) AS tokens
+      SELECT bucket_start AS date, model,
+             SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
       FROM rollup_1h
       WHERE ${withRange(range, '1=1', 'bucket_start')}
       GROUP BY date, model
@@ -73,7 +76,8 @@ export function tokensByDay(db, range = '30d') {
   }
   // 7d: daily grain.
   return db.prepare(`
-    SELECT substr(bucket_start, 1, 10) AS date, model, SUM(input_tokens + output_tokens) AS tokens
+    SELECT substr(bucket_start, 1, 10) AS date, model,
+           SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
     FROM rollup_1h
     WHERE ${withRange(range, '1=1', 'bucket_start')}
     GROUP BY date, model
@@ -95,6 +99,9 @@ export function requestsByHourOfDay(db, range = '7d') {
 }
 
 // Cache hit rate: cache_read / (input + cache_read + cache_write) per model.
+// `input_tokens` is the uncached input component; output/reasoning is excluded
+// because cache accounting applies only to context, and TTL fields are already
+// partitioned into the single cache_write total.
 export function cacheHitRateByModel(db, range = '7d') {
   return db.prepare(`
     SELECT model,
@@ -132,7 +139,7 @@ export function topSessions(db, range = '7d', limit = 5) {
   return db.prepare(`
     SELECT session_id,
            COUNT(*) AS requests,
-           SUM(input_tokens + output_tokens) AS tokens,
+           SUM(input_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens) AS tokens,
            MIN(ts) AS first_ts,
            MAX(ts) AS last_ts
     FROM events

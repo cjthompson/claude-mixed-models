@@ -16,6 +16,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const configPath = process.env.ROUTES_CONFIG ?? join(here, 'routes.config.json');
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
 const PORT = Number(process.env.ROUTER_PORT ?? 8788);
+export function routerHostFromEnv(env = process.env) {
+  return env.ROUTER_HOST || '0.0.0.0';
+}
+const ROUTER_HOST = routerHostFromEnv();
 const DEFAULT_UPSTREAM = process.env.DEFAULT_UPSTREAM ?? 'anthropic';
 
 const HOP_BY_HOP = ['transfer-encoding', 'connection', 'keep-alive', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer'];
@@ -51,6 +55,17 @@ function isLoopbackHost(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
 }
 
+// The Codex subscription route forwards the client's ChatGPT bearer token
+// unchanged. Unlike generic keyed routes (which warn for an explicitly
+// configured cleartext upstream), this bearer credential must never leave the
+// local machine over HTTP. Loopback HTTP remains useful for hermetic tests and
+// local development; every other subscription upstream must use HTTPS.
+export function assertSubscriptionUpstreamSecure(url) {
+  if (url.protocol === 'http:' && !isLoopbackHost(url.hostname)) {
+    throw new Error("Upstream 'openai-subscription' must use HTTPS unless its host is loopback");
+  }
+}
+
 // Upstream names we've already warned about, so a busy router logs the
 // cleartext-credential risk once at config-resolution time (per upstream)
 // rather than once per request.
@@ -83,6 +98,7 @@ function upstreamConn(name) {
   const baseUrl = process.env[u.baseUrlEnv] || u.defaultBaseUrl;
   const url = new URL(baseUrl);
   assertSupportedProtocol(url, name);
+  if (name === 'openai-subscription') assertSubscriptionUpstreamSecure(url);
   warnIfInsecureUpstream(url, name, u.auth);
   let key = null;
   if (u.auth !== 'passthrough') {
@@ -139,7 +155,7 @@ export function applyThinkingCompat(body, upstreamName) {
   body.thinking = { type: 'adaptive' };
 }
 
-export function forward(req, res, conn, outBody, { id, t0, session, model, realModel, reqBody }) {
+export function forward(req, res, conn, outBody, { id, t0, session, model, realModel, reqBody, upstreamRequestPath = req.url }) {
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
   // Prevent upstream from gzip-encoding the response — the router reads the raw
@@ -149,7 +165,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
   headers['content-length'] = String(outBody.length);
   applyAuth(headers, conn);
 
-  const upstreamPath = conn.url.pathname.replace(/\/$/, '') + req.url;
+  const upstreamPath = conn.url.pathname.replace(/\/$/, '') + upstreamRequestPath;
   // http.request() rejects a 'https:' protocol option outright, and
   // https.request() rejects 'http:' outright — each module only speaks its
   // own scheme. conn.url.protocol is validated at the upstreamConn()
@@ -316,6 +332,12 @@ function fail(res, status, message) {
   res.end(JSON.stringify({ error: message }));
 }
 
+function stripOpenAiPrefix(url) {
+  if (url === '/openai' || url.startsWith('/openai?')) return `/${url.slice('/openai'.length)}`;
+  if (url.startsWith('/openai/')) return url.slice('/openai'.length) || '/';
+  return null;
+}
+
 // Exported for tests; the server below wraps it. The handler reads the
 // request body, makes the routing decision, emits REQ/RES log lines, and
 // forwards to the chosen upstream.
@@ -327,6 +349,9 @@ export function handleRequest(req, res) {
     const raw = Buffer.concat(chunks);
     const id = newRequestId();
     const t0 = Date.now();
+    const openaiRequestPath = stripOpenAiPrefix(req.url);
+    const isOpenAiIngress = openaiRequestPath !== null;
+    const upstreamRequestPath = openaiRequestPath ?? req.url;
 
     // Only POSTs with a JSON body carry a model to route on. Everything else
     // (GET /v1/models on startup, bodyless calls) rides the default upstream untouched.
@@ -348,7 +373,17 @@ export function handleRequest(req, res) {
       // This is what we want to record in the stats event so we can attribute
       // usage back to the alias the caller asked for.
       originalModel = body.model;
-      route = resolveRoute(body.model, config.routes);
+      if (isOpenAiIngress) {
+        try {
+          conn = upstreamConn('openai-subscription');
+        } catch (err) {
+          return fail(res, 500, `router: ${err.message}`);
+        }
+        realModel = originalModel;
+        outBody = raw;
+      } else {
+        route = resolveRoute(body.model, config.routes);
+      }
       if (route) {
         try {
           conn = upstreamConn(route.upstream);
@@ -360,7 +395,7 @@ export function handleRequest(req, res) {
         applyToolCompat(body, route.upstream);
         applyThinkingCompat(body, route.upstream);
         outBody = Buffer.from(JSON.stringify(body), 'utf8');
-      } else {
+      } else if (!isOpenAiIngress) {
         // Unmapped model → ride the default upstream untouched. For a Claude
         // subscription this forwards your own credential straight to Anthropic.
         try {
@@ -372,10 +407,18 @@ export function handleRequest(req, res) {
         outBody = raw;
       }
     } else {
-      try {
-        conn = upstreamConn(DEFAULT_UPSTREAM);
-      } catch (err) {
-        return fail(res, 500, `router: ${err.message}`);
+      if (isOpenAiIngress) {
+        try {
+          conn = upstreamConn('openai-subscription');
+        } catch (err) {
+          return fail(res, 500, `router: ${err.message}`);
+        }
+      } else {
+        try {
+          conn = upstreamConn(DEFAULT_UPSTREAM);
+        } catch (err) {
+          return fail(res, 500, `router: ${err.message}`);
+        }
       }
       outBody = raw;
     }
@@ -387,7 +430,7 @@ export function handleRequest(req, res) {
       session,
     });
 
-    forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel, reqBody: parsedBody });
+    forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel, reqBody: parsedBody, upstreamRequestPath });
   });
 }
 
@@ -396,6 +439,10 @@ export function handleRequest(req, res) {
 // long after the assertions complete and hang the suite).
 export function createServer() {
   return http.createServer(handleRequest);
+}
+
+export function listenRouter(server, port, host, onListening) {
+  return server.listen(port, host, onListening);
 }
 
 // Wire graceful shutdown on SIGTERM and SIGINT through a single
@@ -483,7 +530,7 @@ export function installShutdown(srv, { exit = process.exit } = {}) {
 const isEntry = process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isEntry) {
   const server = createServer();
-  server.listen(PORT, () => {
+  listenRouter(server, PORT, ROUTER_HOST, () => {
     console.log(`Router on http://localhost:${PORT}`);
     console.log(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
     console.log(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);

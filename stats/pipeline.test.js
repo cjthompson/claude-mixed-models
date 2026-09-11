@@ -18,9 +18,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { forward } from '../router/server.js';
+import { forward, handleRequest } from '../router/server.js';
 import { runOnce } from './workers/batcher.mjs';
-import { todaysTotals } from './queries.mjs';
+import {
+  todaysTotals,
+  tokensByDay,
+  cacheHitRateByModel,
+  topModels,
+  topSessions,
+} from './queries.mjs';
 import { createFakeUpstream, makeObservableReqRes, SAMPLE_SSE } from '../test-helpers/fake-upstream.mjs';
 
 // Hermetic paths. The router's logEvent reads STATS_EVENTS_FILE; the
@@ -47,6 +53,17 @@ after(async () => {
 
 function makeReqRes() {
   return makeObservableReqRes({ url: `/v1/messages-${++counter}` });
+}
+
+function makePostReqRes(body, url, headers = {}) {
+  const pair = makeObservableReqRes({ method: 'POST', url });
+  pair.req.headers = { host: 'router', ...headers };
+  // Emit after handleRequest has attached its listeners.
+  queueMicrotask(() => {
+    pair.req.emit('data', Buffer.from(JSON.stringify(body)));
+    pair.req.emit('end');
+  });
+  return pair;
 }
 
 test('stats pipeline: router finalize → batcher runOnce → rollup → query', async () => {
@@ -198,11 +215,170 @@ test('stats pipeline: thinking tokens and 1h cache TTL survive the whole chain',
   const result = await runOnce({ jsonlPath, dbPath });
   assert.equal(result.inserted, 1);
 
-  const db = new DatabaseSync(dbPath);
+  let db = new DatabaseSync(dbPath);
   const rollup = db.prepare(`SELECT cache_5m, cache_1h, thinking, output_tokens FROM rollup_5m WHERE model='opus'`).get();
   assert.equal(rollup.cache_5m, 0);
   assert.equal(rollup.cache_1h, 267014);
   assert.equal(rollup.thinking, 83);
   assert.equal(rollup.output_tokens, 1041);
+  // Close the reader before the second batch pass. Keeping an open writer
+  // connection while runOnce() starts its transaction can block SQLite's WAL
+  // writer on platforms that do not permit a second connection to checkpoint.
+  db.close();
+
+  // The same database also receives a post-#012 OpenAI-normalized response.
+  // This keeps the native Anthropic row above on the shared ingestion path and
+  // proves all query consumers use the provider-neutral accounting contract.
+  upstream.respond = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end([
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":700,"cache_write_tokens":200},"output_tokens":50,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":1050}}}',
+      '',
+    ].join('\n'));
+  };
+  const mixedReqRes = makeReqRes();
+  forward(mixedReqRes.req, mixedReqRes.res, conn, Buffer.from('{"model":"gpt-5"}'), {
+    id: 'pipe-openai',
+    t0: Date.now() - 5,
+    session: 'pipe-mixed',
+    model: 'gpt-5',
+    realModel: 'gpt-5',
+  });
+  await new Promise((resolve, reject) => {
+    mixedReqRes.res.on('finish', resolve);
+    mixedReqRes.res.on('error', reject);
+    setTimeout(() => reject(new Error('forward timed out after 5s')), 5000);
+  });
+
+  const mixedLines = readFileSync(jsonlPath, 'utf8').trim().split('\n').filter(Boolean);
+  assert.equal(mixedLines.length, 1);
+  const mixedRec = JSON.parse(mixedLines[0]);
+  assert.equal(mixedRec.id, 'pipe-openai');
+  assert.equal(mixedRec.input_tokens, 100);
+  assert.equal(mixedRec.cache_read_input_tokens, 700);
+  assert.equal(mixedRec.cache_creation_input_tokens, 200);
+  assert.equal(mixedRec.output_tokens, 50);
+  assert.equal(mixedRec.thinking_tokens, 30);
+
+  const mixedResult = await runOnce({ jsonlPath, dbPath });
+  assert.equal(mixedResult.inserted, 1);
+  db = new DatabaseSync(dbPath);
+  const mixedEvent = db.prepare(`SELECT input_tokens, output_tokens, cache_read_input_tokens,
+                                        cache_creation_input_tokens, thinking_tokens
+                                 FROM events WHERE id='pipe-openai'`).get();
+  assert.deepEqual({ ...mixedEvent }, {
+    input_tokens: 100,
+    output_tokens: 50,
+    cache_read_input_tokens: 700,
+    cache_creation_input_tokens: 200,
+    thinking_tokens: 30,
+  });
+  const openaiRollup = db.prepare(`SELECT input_tokens, output_tokens, cache_read, cache_write, thinking
+                                   FROM rollup_5m WHERE model='gpt-5'`).get();
+  assert.deepEqual({ ...openaiRollup }, {
+    input_tokens: 100,
+    output_tokens: 50,
+    cache_read: 700,
+    cache_write: 200,
+    thinking: 30,
+  });
+
+  const chart = tokensByDay(db, 'all');
+  assert.equal(chart.find((r) => r.model === 'gpt-5').tokens, 100 + 700 + 200 + 50);
+  assert.equal(chart.find((r) => r.model === 'opus').tokens, 2 + 267014 + 1041);
+  const hitRates = Object.fromEntries(cacheHitRateByModel(db, 'all').map((r) => [r.model, r.hitRate]));
+  assert.equal(hitRates['gpt-5'], 700 / (100 + 700 + 200));
+  const models = Object.fromEntries(topModels(db, 'all').map((r) => [r.model, r]));
+  assert.equal(models['gpt-5'].thinking, 30);
+  assert.equal(models['gpt-5'].cache_read, 700);
+  assert.equal(models['gpt-5'].cache_write, 200);
+  assert.equal(topSessions(db, 'all').find((r) => r.session_id === 'pipe-mixed').tokens, 1050);
+  db.close();
+});
+
+test('stats pipeline: Codex /openai ingress emits and rolls up Responses usage', async () => {
+  const previousBaseUrl = process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+  const jsonlPath = process.env.STATS_EVENTS_FILE;
+  const dbPath = join(workDir, 'codex-subscription.db');
+  const responseEvent = [
+    'event: response.completed',
+    'data: {"type":"response.completed","response":{"usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":700,"cache_write_tokens":200},"output_tokens":50,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":1050}}}',
+    '',
+  ].join('\n');
+  let receivedUrl;
+  let receivedAuthorization;
+
+  upstream.respond = (upstreamReq, res) => {
+    receivedUrl = upstreamReq.url;
+    receivedAuthorization = upstreamReq.headers.authorization;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(responseEvent.slice(0, 23));
+    res.write(responseEvent.slice(23, 71));
+    res.end(responseEvent.slice(71));
+  };
+
+  try {
+    process.env.OPENAI_SUBSCRIPTION_BASE_URL = `https://127.0.0.1:${upstream.port}/codex`;
+    const { req, res } = makePostReqRes(
+      { model: 'gpt-5.6-terra', input: 'small test request', stream: true },
+      '/openai/responses',
+      { authorization: 'Bearer test-only-subscription-token' },
+    );
+    handleRequest(req, res);
+    let timeout;
+    try {
+      await new Promise((resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('handleRequest timed out after 5s')), 5000);
+        res.once('finish', resolve);
+        res.once('error', reject);
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+    else process.env.OPENAI_SUBSCRIPTION_BASE_URL = previousBaseUrl;
+  }
+
+  assert.equal(receivedUrl, '/codex/responses');
+  assert.equal(receivedAuthorization, 'Bearer test-only-subscription-token');
+  const lines = readFileSync(jsonlPath, 'utf8').trim().split('\n').filter(Boolean);
+  assert.equal(lines.length, 1);
+  const rec = JSON.parse(lines[0]);
+  assert.equal(rec.model, 'gpt-5.6-terra');
+  assert.equal(rec.real_model, 'gpt-5.6-terra');
+  assert.equal(rec.input_tokens, 100);
+  assert.equal(rec.cache_read_input_tokens, 700);
+  assert.equal(rec.cache_creation_input_tokens, 200);
+  assert.equal(rec.output_tokens, 50);
+  assert.equal(rec.thinking_tokens, 30);
+
+  const result = await runOnce({ jsonlPath, dbPath });
+  assert.equal(result.inserted, 1);
+  assert.equal(result.truncated, true);
+  assert.equal(readFileSync(jsonlPath, 'utf8'), '');
+
+  const db = new DatabaseSync(dbPath);
+  const event = db.prepare(`SELECT model, input_tokens, cache_read_input_tokens,
+                                   cache_creation_input_tokens, output_tokens, thinking_tokens
+                            FROM events WHERE model='gpt-5.6-terra'`).get();
+  assert.deepEqual({ ...event }, {
+    model: 'gpt-5.6-terra',
+    input_tokens: 100,
+    cache_read_input_tokens: 700,
+    cache_creation_input_tokens: 200,
+    output_tokens: 50,
+    thinking_tokens: 30,
+  });
+  const rollup = db.prepare(`SELECT input_tokens, cache_read, cache_write, output_tokens, thinking
+                             FROM rollup_5m WHERE model='gpt-5.6-terra'`).get();
+  assert.deepEqual({ ...rollup }, {
+    input_tokens: 100,
+    cache_read: 700,
+    cache_write: 200,
+    output_tokens: 50,
+    thinking: 30,
+  });
   db.close();
 });

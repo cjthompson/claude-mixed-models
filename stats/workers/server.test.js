@@ -62,6 +62,10 @@ test('startServer: GET / serves the dashboard HTML', async () => {
       assert.equal(res.status, 200);
       const html = await res.text();
       assert.match(html, /<html/i);
+      assert.match(html, />Reasoning</);
+      const appRes = await fetch(`${url}/app.js`);
+      assert.equal(appRes.status, 200);
+      assert.match(await appRes.text(), /class="label">Reasoning/);
     } finally {
       await close();
     }

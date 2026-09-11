@@ -13,6 +13,7 @@ Run Claude Code with both Anthropic and MiniMax models via a tiny local router.
 
 ## Running as a service
 To run the router as a persistent background service (auto-restart on crash, auto-start on login), see [`docs/operations/router-as-service.md`](docs/operations/router-as-service.md).
+For routing Codex Responses requests through the local or LAN router ingress with your Codex subscription, see [`docs/operations/codex-subscription.md`](docs/operations/codex-subscription.md). Same-machine clients use `http://127.0.0.1:8788/openai`; LAN clients can use `http://<router-lan-ip>:8788/openai`.
 
 ## Usage stats
 The router emits a JSONL event per request. The `com.claude-mixed-models.stats`

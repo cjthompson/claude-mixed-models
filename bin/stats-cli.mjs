@@ -45,13 +45,15 @@ function renderCards(db) {
   const out = [];
   out.push(color(`Usage stats · range=${RANGE}`, FG.bold));
   out.push('');
-  out.push(`${color('Today', FG.dim)}                  ${color(abbrev(totals.requests), FG.cyan)} requests · ${color(abbrev(totals.input_tokens), FG.blue)} in · ${color(abbrev(totals.output_tokens), FG.cyan)} out`);
+  const todayContext = totals.input_tokens + (totals.cache_read ?? 0) + (totals.cache_write ?? 0);
+  out.push(`${color('Today', FG.dim)}                  ${color(abbrev(totals.requests), FG.cyan)} requests · ${color(abbrev(todayContext), FG.blue)} in · ${color(abbrev(totals.output_tokens), FG.cyan)} out`);
   out.push('');
   out.push(color('Top models', FG.bold));
   for (const m of models) {
     const errRate = m.requests > 0 ? (m.errors / m.requests * 100).toFixed(1) : '0.0';
     const errColor = m.errors > 0 ? FG.red : FG.dim;
-    out.push(`  ${m.model.padEnd(28)} ${color(String(m.requests).padStart(6), FG.cyan)} reqs · ${color(abbrev(m.input_tokens).padStart(7), FG.blue)} in · ${color(abbrev(m.output_tokens).padStart(6), FG.cyan)} out · ${color(errRate.padStart(5) + '%', errColor)} err`);
+    const context = m.input_tokens + (m.cache_read ?? 0) + (m.cache_write ?? 0);
+    out.push(`  ${m.model.padEnd(28)} ${color(String(m.requests).padStart(6), FG.cyan)} reqs · ${color(abbrev(context).padStart(7), FG.blue)} in · ${color(abbrev(m.output_tokens).padStart(6), FG.cyan)} out · ${color(errRate.padStart(5) + '%', errColor)} err`);
   }
   out.push('');
   out.push(color('Top sessions', FG.bold));

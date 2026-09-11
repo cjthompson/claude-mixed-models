@@ -39,6 +39,23 @@ function freshDb() {
   return db;
 }
 
+// Rows emitted after the #012 usage normalization and a native Anthropic row
+// share one storage contract: input_tokens is uncached context, while the
+// cache counters are separate context categories. Keep these values explicit
+// so query tests exercise both providers rather than only zero-cache fixtures.
+function addMixedProviderRows(db) {
+  const insert = db.prepare(`
+    INSERT INTO events (id, ts, model, real_model, upstream, status, duration_ms, session_id,
+                       input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                       cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  // OpenAI #012-normalized: raw input=1000 => uncached=100, cached=700, write=200.
+  insert.run('o1', '2026-06-09T10:00:00.000Z', 'gpt-5', 'gpt-5', 'api.openai.com', 200, 1000, 's3', 100, 50, 700, 200, 0, 0, 30);
+  // Anthropic-native: input_tokens already means uncached prompt input.
+  insert.run('c1', '2026-06-09T11:00:00.000Z', 'claude-sonnet', 'claude-sonnet-4-6', 'api.anthropic.com', 200, 1000, 's3', 400, 40, 300, 100, 0, 100, 20);
+}
+
 // Build rollups from the seeded events so the rollup-backed queries have data.
 // Mirrors what the batcher does, but inline so queries.test.js stays self-contained.
 function buildRollups(db) {
@@ -70,7 +87,7 @@ test('tokensByDay: returns one row per day, summed by model', () => {
   const byDate = {};
   for (const r of rows) byDate[r.date] = (byDate[r.date] ?? 0) + r.tokens;
   assert.equal(byDate['2026-06-07'], 100 + 10 + 200 + 20 + 0 + 0);   // 330
-  assert.equal(byDate['2026-06-08'], 300 + 30 + 400 + 40);            // 770
+  assert.equal(byDate['2026-06-08'], 300 + 50 + 400 + 30 + 40);      // 820
 });
 
 test('tokensByDay: 24h range uses hourly buckets, not daily', () => {
@@ -131,12 +148,44 @@ test('cacheHitRateByModel: returns ratio of cache_read to total input', () => {
   assert.equal(byModel['claude-opus'], 0);
 });
 
-test('topModels: returns models ordered by total input_tokens desc', () => {
+test('mixed providers: chart, sessions, hit rates, model components, and range totals use all token categories', () => {
+  const db = freshDb();
+  addMixedProviderRows(db);
+  buildRollups(db);
+
+  const chartRows = tokensByDay(db, 'all');
+  assert.equal(chartRows.find((r) => r.model === 'gpt-5').tokens, 100 + 700 + 200 + 50);
+  assert.equal(chartRows.find((r) => r.model === 'claude-sonnet').tokens, 400 + 300 + 100 + 40);
+
+  const session = topSessions(db, 'all').find((r) => r.session_id === 's3');
+  assert.equal(session.tokens, (100 + 700 + 200 + 50) + (400 + 300 + 100 + 40));
+
+  const hitRates = Object.fromEntries(cacheHitRateByModel(db, 'all').map((r) => [r.model, r.hitRate]));
+  assert.equal(hitRates['gpt-5'], 700 / (100 + 700 + 200));
+  assert.equal(hitRates['claude-sonnet'], 300 / (400 + 300 + 100));
+
+  const models = Object.fromEntries(topModels(db, 'all').map((r) => [r.model, r]));
+  assert.equal(models['gpt-5'].input_tokens, 100);
+  assert.equal(models['gpt-5'].cache_read, 700);
+  assert.equal(models['gpt-5'].cache_write, 200);
+  assert.equal(models['gpt-5'].thinking, 30);
+  assert.equal(models['claude-sonnet'].input_tokens, 400);
+  assert.equal(models['claude-sonnet'].cache_read, 300);
+  assert.equal(models['claude-sonnet'].cache_write, 100);
+  assert.equal(models['claude-sonnet'].thinking, 20);
+
+  const totals = rangeTotals(db, 'all');
+  assert.equal(totals.input_tokens + totals.cache_read + totals.cache_write, 1500 + 1050 + 300);
+  assert.equal(totals.output_tokens, 190);
+  assert.equal(totals.thinking, 133);
+});
+
+test('topModels: returns models ordered by total context desc', () => {
   const db = freshDb();
   buildRollups(db);
   const rows = topModels(db, 'all');
-  assert.equal(rows[0].model, 'minimax');          // 100+200+300 = 600
-  assert.equal(rows[1].model, 'claude-opus');      // 0+400 = 400
+  assert.equal(rows[0].model, 'minimax');          // context = 100+200+300+50 = 650
+  assert.equal(rows[1].model, 'claude-opus');      // context = 0+400 = 400
   assert.equal(rows[0].requests, 3);
   assert.equal(rows[1].requests, 2);
 });

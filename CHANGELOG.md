@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-10
+
+### Track Codex subscription token usage through the router (P001)
+- Add a protocol-specific OpenAI subscription ingress
+- Extract usage from OpenAI Responses streams
+- Normalize provider-neutral token accounting
+- Make stats presentation provider-neutral
+- Document and verify the tracked Codex profile
+
 ## 2026-07-25
 
 ### Fixes

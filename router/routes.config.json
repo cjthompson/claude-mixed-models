@@ -1,7 +1,8 @@
 {
   "upstreams": {
     "anthropic": { "baseUrlEnv": "ANTHROPIC_BASE_URL_UPSTREAM", "defaultBaseUrl": "https://api.anthropic.com", "auth": "passthrough" },
-    "minimax": { "baseUrlEnv": "MINIMAX_BASE_URL", "defaultBaseUrl": "https://api.minimax.io/anthropic", "keyEnv": "MINIMAX_API_KEY", "auth": "bearer" }
+    "minimax": { "baseUrlEnv": "MINIMAX_BASE_URL", "defaultBaseUrl": "https://api.minimax.io/anthropic", "keyEnv": "MINIMAX_API_KEY", "auth": "bearer" },
+    "openai-subscription": { "baseUrlEnv": "OPENAI_SUBSCRIPTION_BASE_URL", "defaultBaseUrl": "https://chatgpt.com/backend-api/codex", "auth": "passthrough" }
   },
   "routes": {
     "claude-haiku-4-5-20251001": { "upstream": "minimax", "realModel": "MiniMax-M3" },

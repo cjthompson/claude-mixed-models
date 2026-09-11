@@ -76,11 +76,11 @@ async function refresh() {
   const t = data.rangeTotals ?? {};
   const RANGE_LABELS = { '1h': '1 hour', '5h': '5 hours', '24h': '24 hours', '7d': '7 days', '30d': '30 days', 'all': 'All time' };
   document.querySelector('#card-totals h2').textContent = RANGE_LABELS[range] ?? range;
-  // Show the thinking line only when the day had any — most days on a
-  // Haiku/Sonnet-only workload will be 0, and "Thinking 0" would just
+  // Show the reasoning line only when the day had any — most days on a
+  // Haiku/Sonnet-only workload will be 0, and "Reasoning 0" would just
   // be visual noise.
   const thinkingLine = t.thinking > 0
-    ? `<div><span class="label">Thinking</span><span class="value">${abbrev(t.thinking)}</span></div>`
+    ? `<div><span class="label">Reasoning</span><span class="value">${abbrev(t.thinking)}</span></div>`
     : '';
   document.getElementById('totals').innerHTML = `
     <div><span class="label">Requests</span><span class="value">${abbrev(t.requests)}</span></div>

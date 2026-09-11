@@ -10,7 +10,8 @@ import { join } from 'node:path';
 import {
   applyAuth, applyToolCompat, applyThinkingCompat, forward, handleRequest,
   installShutdown, KNOWN_AUTH_MODES, __setRouterShuttingDownForTest,
-  assertSupportedProtocol, warnIfInsecureUpstream,
+  assertSupportedProtocol, assertSubscriptionUpstreamSecure, listenRouter,
+  routerHostFromEnv, warnIfInsecureUpstream,
 } from './server.js';
 import { createFakeUpstream, makeObservableReqRes, SAMPLE_SSE } from '../test-helpers/fake-upstream.mjs';
 
@@ -39,6 +40,32 @@ afterEach(() => {
   // catches any test that throws before reaching that reset, so a later
   // test never silently inherits "shutting down" state from an earlier one.
   __setRouterShuttingDownForTest(false);
+});
+
+test('router bind defaults to all interfaces and honors ROUTER_HOST overrides', async () => {
+  const previousHost = process.env.ROUTER_HOST;
+  const srv = http.createServer();
+  try {
+    delete process.env.ROUTER_HOST;
+    const defaultHost = routerHostFromEnv();
+    assert.equal(defaultHost, '0.0.0.0');
+    await new Promise((resolve, reject) => {
+      srv.once('error', reject);
+      listenRouter(srv, 0, defaultHost, resolve);
+    });
+    assert.equal(srv.address().address, '0.0.0.0');
+
+    process.env.ROUTER_HOST = '127.0.0.1';
+    const overrideHost = routerHostFromEnv();
+    assert.equal(overrideHost, '127.0.0.1');
+    const calls = [];
+    listenRouter({ listen(...args) { calls.push(args); } }, 8788, overrideHost, () => {});
+    assert.equal(calls[0][1], '127.0.0.1');
+  } finally {
+    if (previousHost === undefined) delete process.env.ROUTER_HOST;
+    else process.env.ROUTER_HOST = previousHost;
+    if (srv.listening) await new Promise((resolve) => srv.close(resolve));
+  }
 });
 
 // --- applyAuth -------------------------------------------------------------
@@ -84,6 +111,36 @@ test('assertSupportedProtocol: unsupported scheme throws a clean config error', 
     () => assertSupportedProtocol(new URL('ftp://example.com'), 'weird-upstream'),
     /Unsupported protocol 'ftp:' for upstream 'weird-upstream'/
   );
+});
+
+test('assertSubscriptionUpstreamSecure: allows HTTPS and loopback HTTP for the subscription upstream', () => {
+  assert.doesNotThrow(() => assertSubscriptionUpstreamSecure(new URL('https://chatgpt.com/backend-api/codex')));
+  assert.doesNotThrow(() => assertSubscriptionUpstreamSecure(new URL('http://127.0.0.1:8788/codex')));
+});
+
+test('handleRequest: rejects non-loopback HTTP subscription override before forwarding credentials', async () => {
+  const previousBaseUrl = process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+  const { res, getStatus, getBody } = makeObservableReqRes();
+  try {
+    process.env.OPENAI_SUBSCRIPTION_BASE_URL = 'http://192.168.1.20/codex';
+    handleRequest(
+      makePostReq({ model: 'gpt-5', input: 'test' }, '/openai/responses', {
+        host: 'router',
+        authorization: 'Bearer test-only-subscription-token',
+      }),
+      res,
+    );
+    await new Promise((resolve, reject) => {
+      res.once('finish', resolve);
+      res.once('error', reject);
+    });
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+    else process.env.OPENAI_SUBSCRIPTION_BASE_URL = previousBaseUrl;
+  }
+
+  assert.equal(getStatus(), 500);
+  assert.match(getBody(), /openai-subscription.*HTTPS.*loopback/i);
 });
 
 // --- warnIfInsecureUpstream -------------------------------------------------
@@ -355,11 +412,11 @@ function captureLog() {
   };
 }
 
-function makePostReq(bodyObj, url = '/v1/messages') {
+function makePostReq(bodyObj, url = '/v1/messages', headers = { host: 'router' }) {
   const req = new EventEmitter();
   req.method = 'POST';
   req.url = url;
-  req.headers = { host: 'router' };
+  req.headers = headers;
   const body = JSON.stringify(bodyObj);
   // Push the body in a microtask so listeners attached after construction
   // (the data/end handlers inside handleRequest) still fire.
@@ -377,6 +434,24 @@ function makeGetReq(url) {
   req.headers = { host: 'router' };
   queueMicrotask(() => req.emit('end'));
   return req;
+}
+
+function makeHandleResponse() {
+  const res = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  res.headersSent = false;
+  res.writeHead = () => {
+    res.headersSent = true;
+    return res;
+  };
+  return res;
+}
+
+function waitForFinish(res) {
+  return new Promise((resolve, reject) => {
+    res.once('finish', resolve);
+    res.once('error', reject);
+    setTimeout(() => reject(new Error('request timed out after 5s')), 5000);
+  });
 }
 
 test('handleRequest: REQ line for mapped route includes the rewritten real model', async () => {
@@ -483,6 +558,146 @@ after(async () => {
 function makeReqResForForward() {
   return makeObservableReqRes({ url: `/v1/messages-${++fakeServerCounter}` });
 }
+
+test('handleRequest: /openai ingress strips its prefix, preserves headers and raw body', async () => {
+  const previousBaseUrl = process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+  const sentinel = 'Bearer subscription-sentinel-credential';
+  const body = {
+    model: 'minimax',
+    tools: [{ type: 'server_tool', name: 'server_tool' }],
+    thinking: { type: 'disabled' },
+  };
+  const rawBody = JSON.stringify(body);
+  let received;
+  upstream.respond = (upstreamReq, res) => {
+    const chunks = [];
+    upstreamReq.on('data', (chunk) => chunks.push(chunk));
+    upstreamReq.on('end', () => {
+      received = {
+        url: upstreamReq.url,
+        headers: upstreamReq.headers,
+        body: Buffer.concat(chunks),
+      };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+  };
+  const logs = captureLog();
+  const errors = captureConsoleError();
+  try {
+    process.env.OPENAI_SUBSCRIPTION_BASE_URL = `https://127.0.0.1:${upstream.port}/subscription-base/`;
+    const req = makePostReq(body, '/openai/v1/responses?foo=bar', {
+      host: 'router',
+      authorization: sentinel,
+      'chatgpt-account-id': 'account-sentinel',
+      originator: 'codex-cli-test',
+      'openai-product': 'codex-cli-test',
+    });
+    const res = makeHandleResponse();
+    handleRequest(req, res);
+    await waitForFinish(res);
+  } finally {
+    logs.restore();
+    errors.restore();
+    if (previousBaseUrl === undefined) delete process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+    else process.env.OPENAI_SUBSCRIPTION_BASE_URL = previousBaseUrl;
+  }
+
+  assert.equal(received.url, '/subscription-base/v1/responses?foo=bar');
+  assert.equal(received.headers.authorization, sentinel);
+  assert.equal(received.headers['chatgpt-account-id'], 'account-sentinel');
+  assert.equal(received.headers.originator, 'codex-cli-test');
+  assert.equal(received.headers['openai-product'], 'codex-cli-test');
+  assert.deepEqual(received.body, Buffer.from(rawBody));
+  assert.doesNotMatch([...logs.lines, ...errors.lines].join('\n'), /subscription-sentinel-credential/);
+});
+
+test('handleRequest: /openai responses forwards response.completed usage from chunked SSE', async () => {
+  const previousBaseUrl = process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+  const responseEvent = 'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38}}}\n\n';
+  let receivedUrl;
+  upstream.respond = (upstreamReq, res) => {
+    receivedUrl = upstreamReq.url;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(responseEvent.slice(0, 17));
+    res.write(responseEvent.slice(17, 49));
+    res.end(responseEvent.slice(49));
+  };
+  const logs = captureLog();
+  try {
+    process.env.OPENAI_SUBSCRIPTION_BASE_URL = `https://127.0.0.1:${upstream.port}/subscription-base/`;
+    const req = makePostReq({ model: 'gpt-5', input: 'hello' }, '/openai/v1/responses');
+    const res = makeHandleResponse();
+    handleRequest(req, res);
+    await waitForFinish(res);
+  } finally {
+    logs.restore();
+    if (previousBaseUrl === undefined) delete process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+    else process.env.OPENAI_SUBSCRIPTION_BASE_URL = previousBaseUrl;
+  }
+
+  assert.equal(receivedUrl, '/subscription-base/v1/responses');
+  const resLine = logs.lines.find((l) => /^\[\d{2}:\d{2}:\d{2} RES /.test(l));
+  assert.ok(resLine, `expected a RES line, got: ${JSON.stringify(logs.lines)}`);
+  const stripped = resLine.replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(stripped, /status=200/);
+  assert.match(stripped, /\[in: 31 \| out: 7/);
+  assert.match(stripped, /total: 38/);
+});
+
+test('handleRequest: /openaiish remains on the default Anthropic route with its full path', async () => {
+  const previousBaseUrl = process.env.ANTHROPIC_BASE_URL_UPSTREAM;
+  let received;
+  upstream.respond = (upstreamReq, res) => {
+    received = { url: upstreamReq.url };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{}');
+  };
+  try {
+    process.env.ANTHROPIC_BASE_URL_UPSTREAM = `https://127.0.0.1:${upstream.port}/anthropic-base`;
+    const req = makePostReq({ model: 'claude-sonnet-4-6', messages: [] }, '/openaiish/v1/messages');
+    const res = makeHandleResponse();
+    handleRequest(req, res);
+    await waitForFinish(res);
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.ANTHROPIC_BASE_URL_UPSTREAM;
+    else process.env.ANTHROPIC_BASE_URL_UPSTREAM = previousBaseUrl;
+  }
+  assert.equal(received.url, '/anthropic-base/openaiish/v1/messages');
+});
+
+test('handleRequest: normal MiniMax traffic still rewrites model, tools and thinking', async () => {
+  const previousBaseUrl = process.env.MINIMAX_BASE_URL;
+  let received;
+  upstream.respond = (upstreamReq, res) => {
+    const chunks = [];
+    upstreamReq.on('data', (chunk) => chunks.push(chunk));
+    upstreamReq.on('end', () => {
+      received = { url: upstreamReq.url, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+  };
+  try {
+    process.env.MINIMAX_BASE_URL = `https://127.0.0.1:${upstream.port}/minimax-base`;
+    const req = makePostReq({
+      model: 'minimax',
+      tools: [{ type: 'server_tool', name: 'server_tool' }],
+      thinking: { type: 'disabled' },
+      messages: [],
+    });
+    const res = makeHandleResponse();
+    handleRequest(req, res);
+    await waitForFinish(res);
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.MINIMAX_BASE_URL;
+    else process.env.MINIMAX_BASE_URL = previousBaseUrl;
+  }
+  assert.equal(received.url, '/minimax-base/v1/messages');
+  assert.equal(received.body.model, 'MiniMax-M3');
+  assert.deepEqual(received.body.tools[0].input_schema, { type: 'object', additionalProperties: true });
+  assert.deepEqual(received.body.thinking, { type: 'adaptive' });
+});
 
 test('forward: SSE stream — extracts usage from message_delta and emits a token bracket on the RES line', async () => {
   const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
