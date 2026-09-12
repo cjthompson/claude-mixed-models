@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-11
+
+### Tasks
+- Centralize dashboard timezone normalization at the JSON boundary (#stats, #timezone)
+
 ## 2026-09-10
 
 ### Track Codex subscription token usage through the router (P001)
