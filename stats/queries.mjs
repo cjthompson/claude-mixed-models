@@ -37,52 +37,20 @@ function bindRange(range, ...rest) {
   return t ? [...rest, t] : rest;
 }
 
-// Stacked bar chart of token usage. Grain matches the selected range:
-//   1h / 5h → 5-minute buckets (so short ranges show fine-grained bars)
-//   24h     → hour buckets (a daily rollup would collapse to a single bar)
-//   7d/30d/all → day buckets
-// The bucket key is returned as `date` regardless of grain; the frontend
-// slices it for display (HH:MM for sub-day, YYYY-MM-DD for daily).
-export function tokensByDay(db, range = '30d') {
-  if (range === '30d' || range === 'all') {
-    return db.prepare(`
-      SELECT bucket_start AS date, model,
-             SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
-      FROM rollup_1d
-      GROUP BY date, model
-      ORDER BY date, model
-    `).all();
-  }
-  if (range === '1h' || range === '5h') {
-    return db.prepare(`
-      SELECT bucket_start AS date, model,
-             SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
-      FROM rollup_5m
-      WHERE ${withRange(range, '1=1', 'bucket_start')}
-      GROUP BY date, model
-      ORDER BY date, model
-    `).all(...bindRange(range));
-  }
-  if (range === '24h') {
-    // Hourly granularity: otherwise a daily grouping collapses to one bar.
-    return db.prepare(`
-      SELECT bucket_start AS date, model,
-             SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
-      FROM rollup_1h
-      WHERE ${withRange(range, '1=1', 'bucket_start')}
-      GROUP BY date, model
-      ORDER BY date, model
-    `).all(...bindRange(range));
-  }
-  // 7d: daily grain.
+// Stacked bar chart source. The server stays UTC-neutral; the viewer groups
+// these timestamped buckets into local labels at the JSON boundary.
+export function tokensByBucket(db, range = '30d') {
+  const table = (range === '1h' || range === '5h') ? 'rollup_5m' : 'rollup_1h';
   return db.prepare(`
-    SELECT substr(bucket_start, 1, 10) AS date, model,
+    SELECT bucket_start AS bucket, model,
            SUM(input_tokens + cache_read + cache_write + output_tokens) AS tokens
-    FROM rollup_1h
+    FROM ${table}
     WHERE ${withRange(range, '1=1', 'bucket_start')}
-    GROUP BY date, model
-    ORDER BY date, model
-  `).all(...bindRange(range));
+    GROUP BY bucket, model
+    ORDER BY bucket, model
+  `).all(...bindRange(range))
+    .map((r) => ({ bucket: r.bucket, model: r.model, tokens: Number(r.tokens) }))
+    .filter((r) => Number.isFinite(r.tokens));
 }
 
 // Per-hour request counts over the window, one row per rollup_1h bucket.

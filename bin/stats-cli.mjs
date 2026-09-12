@@ -35,12 +35,18 @@ function abbrev(n) {
 
 function color(s, code) { return `${code}${s}${RESET}`; }
 
+function requestsByLocalHour(rows) {
+  const totals = new Array(24).fill(0);
+  for (const row of rows) totals[new Date(row.bucket).getHours()] += Number(row.requests ?? 0);
+  return totals.map((requests, hour) => ({ hour, requests }));
+}
+
 function renderCards(db) {
   const totals  = todaysTotals(db);
   const models  = topModels(db, RANGE, 5);
   const sessions = topSessions(db, RANGE, 5);
   const errors  = errorsByStatus(db, '24h');
-  const hours   = requestsByHourOfDay(db, RANGE);
+  const hours   = requestsByLocalHour(requestsByHourOfDay(db, RANGE));
 
   const out = [];
   out.push(color(`Usage stats · range=${RANGE}`, FG.bold));

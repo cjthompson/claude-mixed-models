@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  tokensByDay,
+  tokensByBucket,
   requestsByHourOfDay,
   cacheHitRateByModel,
   topModels,
@@ -79,29 +79,37 @@ function buildRollups(db) {
   }
 }
 
-test('tokensByDay: returns one row per day, summed by model', () => {
+test('tokensByBucket: returns timestamped hourly rows for long ranges', () => {
   const db = freshDb();
   buildRollups(db);
-  const rows = tokensByDay(db, '30d');
-  // Two days, each row totals across all models for that day.
-  const byDate = {};
-  for (const r of rows) byDate[r.date] = (byDate[r.date] ?? 0) + r.tokens;
-  assert.equal(byDate['2026-06-07'], 100 + 10 + 200 + 20 + 0 + 0);   // 330
-  assert.equal(byDate['2026-06-08'], 300 + 50 + 400 + 30 + 40);      // 820
+  const rows = tokensByBucket(db, 'all');
+  assert.ok(rows.some((r) => r.bucket === '2026-06-07T10:00:00.000Z'));
+  assert.ok(rows.every((r) => /T\d{2}:00:00\.000Z$/.test(r.bucket)));
 });
 
-test('tokensByDay: 24h range uses hourly buckets, not daily', () => {
+test('tokensByBucket: preserves exact UTC ISO bucket timestamps for all range', () => {
+  const db = freshDb();
+  db.prepare(`INSERT INTO rollup_1h
+    (bucket_start, model, upstream, requests, errors, input_tokens, output_tokens,
+     cache_read, cache_write, cache_5m, cache_1h, thinking)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    '2026-09-12T00:00:00.000Z', 'timestamp-model', 'test', 1, 0, 10, 2, 0, 0, 0, 0, 0);
+  const row = tokensByBucket(db, 'all').find((r) => r.model === 'timestamp-model');
+  assert.deepEqual(row, { bucket: '2026-09-12T00:00:00.000Z', model: 'timestamp-model', tokens: 12 });
+});
+
+test('tokensByBucket: 24h range uses hourly buckets, not daily', () => {
   // Regression: a daily rollup collapses the 24h window to a single bar.
-  // tokensByDay must read rollup_1h without the date substr so the chart
+  // tokensByBucket must read rollup_1h without the date substr so the chart
   // shows ~24 hourly bars.
   const db = freshDb();
   buildRollups(db);
-  const rows = tokensByDay(db, '24h');
+  const rows = tokensByBucket(db, '24h');
   // Seed spans 2 days; 24h filter only catches one of them. We assert
   // shape, not counts (the test seed is older than 24h relative to now).
-  // The point is: each row's `date` carries a time component.
+  // The point is: each row's `bucket` carries a time component.
   for (const r of rows) {
-    assert.match(r.date, /T\d{2}:00:00\.000Z$/, `expected hourly bucket, got ${r.date}`);
+    assert.match(r.bucket, /T\d{2}:00:00\.000Z$/, `expected hourly bucket, got ${r.bucket}`);
   }
 });
 
@@ -153,7 +161,7 @@ test('mixed providers: chart, sessions, hit rates, model components, and range t
   addMixedProviderRows(db);
   buildRollups(db);
 
-  const chartRows = tokensByDay(db, 'all');
+  const chartRows = tokensByBucket(db, 'all');
   assert.equal(chartRows.find((r) => r.model === 'gpt-5').tokens, 100 + 700 + 200 + 50);
   assert.equal(chartRows.find((r) => r.model === 'claude-sonnet').tokens, 400 + 300 + 100 + 40);
 
@@ -210,7 +218,7 @@ test('ranged rollup queries filter on bucket_start (not ts) without error', () =
   // of whether any rows fall inside the window — so it stays valid as dates advance.
   const db = freshDb();
   buildRollups(db);
-  assert.doesNotThrow(() => tokensByDay(db, '7d'));
+  assert.doesNotThrow(() => tokensByBucket(db, '7d'));
   assert.doesNotThrow(() => requestsByHourOfDay(db, '30d'));
   assert.doesNotThrow(() => cacheHitRateByModel(db, '30d'));
   assert.doesNotThrow(() => topModels(db, '30d'));

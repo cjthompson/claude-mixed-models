@@ -46,3 +46,21 @@ test('stats CLI: mixed-provider context and session totals include cache categor
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('stats CLI: renders raw UTC request buckets in the process local timezone', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'stats-cli-hour-'));
+  try {
+    const jsonlPath = join(dir, 'events.jsonl');
+    const dbPath = join(dir, 'stats.db');
+    writeFileSync(jsonlPath, JSON.stringify({
+      id: 'hour', ts: '2026-09-12T00:15:00.000Z', model: 'm', real_model: 'm', upstream: 'x',
+      status: 200, durationMs: 10, sessionId: 's', input_tokens: 1, output_tokens: 1,
+    }) + '\n');
+    await runOnce({ jsonlPath, dbPath });
+    const raw = execFileSync(process.execPath, ['bin/stats-cli.mjs', '--range=all'], {
+      cwd: join(import.meta.dirname, '..'), env: { ...process.env, TZ: 'America/Denver', STATS_DB_PATH: dbPath }, encoding: 'utf8',
+    }).replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(raw, /18:00/);
+    assert.doesNotMatch(raw, /undefined:00/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

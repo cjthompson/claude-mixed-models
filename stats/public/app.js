@@ -74,7 +74,7 @@ async function refresh() {
     if (res.status === 304) return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     lastEtag = res.headers.get('etag');
-    data = await res.json();
+    data = ViewerClock.fromBrowser().normalizeDashboard(await res.json());
   } catch (err) {
     console.error('fetch failed', err);
     return;
@@ -99,63 +99,21 @@ async function refresh() {
 
   // Tokens per bucket (stacked by model). Title + label format depend on
   // the bucket grain: 5m for sub-hour ranges, hour for 24h, day otherwise.
-  const is5mRange = range === '1h' || range === '5h';
-  const isHourRange = range === '24h';
-  const title = is5mRange ? 'Tokens per 5m'
-              : isHourRange ? 'Tokens per hour'
-              : 'Tokens per day';
-  document.querySelector('.card--wide h2').textContent = title;
-  const dayMap = {};
-  for (const r of data.tokensByDay ?? []) {
-    const cm = canonicalModel(r.model);
-    const day = dayMap[r.date] ??= {};
-    day[cm] = (day[cm] ?? 0) + r.tokens;
-  }
-  // 24h: rollup_1h only emits rows for buckets with traffic, but the chart
-  // should always show all 24 hourly bars so empty hours are visible.
-  // Synthesize the missing buckets here (UTC top-of-hour boundaries match
-  // rollup_1h bucket_start).
-  if (isHourRange) {
-    const now = new Date();
-    now.setUTCMinutes(0, 0, 0);
-    for (let i = 23; i >= 0; i--) {
-      const d = new Date(now);
-      d.setUTCHours(d.getUTCHours() - i);
-      const iso = d.toISOString().replace(/\.\d{3}Z$/, '.000Z');
-      if (!dayMap[iso]) dayMap[iso] = {};
-    }
-  }
-  // For sub-day ranges, format ISO timestamps as HH:MM in the viewer's
-  // local timezone. We aggregate into local-time buckets so DST fall-back
-  // collisions (two UTC buckets an hour apart that format to the same
-  // HH:MM) sum instead of overwriting.
-  const isSubDay = is5mRange || isHourRange;
-  const fmtLocal = (iso) => {
-    const dt = new Date(iso);
-    return `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
-  };
-  const dayLabels = [];
-  const localMap = {}; // local label -> { model -> tokens }
-  for (const iso of Object.keys(dayMap).sort()) {
-    const label = isSubDay ? fmtLocal(iso) : iso;
-    if (!localMap[label]) { localMap[label] = {}; dayLabels.push(label); }
-    for (const [model, tokens] of Object.entries(dayMap[iso])) {
-      localMap[label][model] = (localMap[label][model] ?? 0) + tokens;
-    }
-  }
-  const models = [...new Set((data.tokensByDay ?? []).map((r) => canonicalModel(r.model)))].sort();
-  renderStackedBar('chart-tokens', dayLabels, models, (label, model) => localMap[label]?.[model] ?? 0);
+  document.querySelector('.card--wide h2').textContent = data.tokenChart.title;
+  const tokenLabels = data.tokenChart.labels;
+  const tokenBuckets = data.tokenChart.buckets;
+  const tokenBucketByLabel = new Map(tokenBuckets.map((bucket) => [bucket.label, bucket]));
+  const models = [...new Set(tokenBuckets.flatMap((b) => Object.keys(b.models ?? {}).map(canonicalModel)))].sort();
+  renderStackedBar('chart-tokens', tokenLabels, models, (label, model) => {
+    const bucket = tokenBucketByLabel.get(label);
+    return Object.entries(bucket?.models ?? {}).filter(([raw]) => canonicalModel(raw) === model)
+      .reduce((sum, [, tokens]) => sum + tokens, 0);
+  });
 
   // Requests by hour-of-day: server returns per-bucket UTC counts; we
   // group them by *browser-local* hour-of-day so the chart reflects the
   // viewer's timezone rather than the server's.
-  const localHourTotals = new Array(24).fill(0);
-  for (const { bucket, requests } of data.requestsByHourOfDay ?? []) {
-    localHourTotals[new Date(bucket).getHours()] += requests;
-  }
-  renderBars('chart-hours',
-    localHourTotals.map((_, h) => String(h).padStart(2, '0')),
-    localHourTotals);
+  renderBars('chart-hours', data.requestHourChart.labels, data.requestHourChart.values);
 
   // Cache hit rate (percent)
   const cacheRows = [];

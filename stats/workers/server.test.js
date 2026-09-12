@@ -29,13 +29,25 @@ test('startServer: GET /api/stats returns JSON for a populated DB', async () => 
   const dbPath = join(dir, 'stats.db');
   try {
     seed(dbPath);
+    const seeded = new DatabaseSync(dbPath);
+    seeded.prepare(`INSERT INTO rollup_1h
+      (bucket_start, model, upstream, requests, errors, input_tokens, output_tokens,
+       cache_read, cache_write, cache_5m, cache_1h, thinking)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      '2026-09-12T00:00:00.000Z', 'timestamp-model', 'test', 1, 0, 10, 2, 0, 0, 0, 0, 0);
+    seeded.close();
     const port = 18789 + Math.floor(Math.random() * 1000);
     const { url, close } = await startServer({ dbPath, port, publicDir });
     try {
       const res = await fetch(`${url}/api/stats?range=7d`);
       assert.equal(res.status, 200);
       const json = await res.json();
-      assert.ok('tokensByDay' in json);
+      assert.ok('tokensByBucket' in json);
+      assert.ok(!('tokensByDay' in json));
+      assert.ok(json.tokensByBucket.every((row) => row.bucket && row.model && Number.isFinite(row.tokens)));
+      assert.deepEqual(json.tokensByBucket.find((row) => row.model === 'timestamp-model'), {
+        bucket: '2026-09-12T00:00:00.000Z', model: 'timestamp-model', tokens: 12,
+      });
       assert.ok('requestsByHourOfDay' in json);
       assert.ok('cacheHitRateByModel' in json);
       assert.ok('topModels' in json);
@@ -66,6 +78,9 @@ test('startServer: GET / serves the dashboard HTML', async () => {
       const appRes = await fetch(`${url}/app.js`);
       assert.equal(appRes.status, 200);
       assert.match(await appRes.text(), /class="label">Reasoning/);
+      const clockRes = await fetch(`${url}/viewer-clock.js`);
+      assert.equal(clockRes.status, 200);
+      assert.match(html, /viewer-clock\.js[\s\S]*app\.js/);
     } finally {
       await close();
     }

@@ -22,7 +22,7 @@ import { forward, handleRequest } from '../router/server.js';
 import { runOnce } from './workers/batcher.mjs';
 import {
   todaysTotals,
-  tokensByDay,
+  tokensByBucket,
   cacheHitRateByModel,
   topModels,
   topSessions,
@@ -284,7 +284,7 @@ test('stats pipeline: thinking tokens and 1h cache TTL survive the whole chain',
     thinking: 30,
   });
 
-  const chart = tokensByDay(db, 'all');
+  const chart = tokensByBucket(db, 'all');
   assert.equal(chart.find((r) => r.model === 'gpt-5').tokens, 100 + 700 + 200 + 50);
   assert.equal(chart.find((r) => r.model === 'opus').tokens, 2 + 267014 + 1041);
   const hitRates = Object.fromEntries(cacheHitRateByModel(db, 'all').map((r) => [r.model, r.hitRate]));

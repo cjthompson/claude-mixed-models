@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import {
-  tokensByDay,
+  tokensByBucket,
   requestsByHourOfDay,
   cacheHitRateByModel,
   topModels,
@@ -51,7 +51,7 @@ function buildApiHandler(dbPath) {
     try {
       const payload = {
         range,
-        tokensByDay:          query(dbPath, range, tokensByDay),
+        tokensByBucket:       query(dbPath, range, tokensByBucket),
         requestsByHourOfDay:  query(dbPath, range, requestsByHourOfDay),
         cacheHitRateByModel:  query(dbPath, range, cacheHitRateByModel),
         topModels:            query(dbPath, range, topModels),
