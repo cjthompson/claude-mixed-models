@@ -1,4 +1,39 @@
-// Stable color per model/session: djb2 hash of the first 8 chars → fixed palette.
+// --- Color scheme: Earth ---
+// Terracotta (claude-*) / Slate (gpt-*) / Moss (minimax*), with per-family
+// hue drift across 4 performance tiers (0 = dim → 3 = brightest).
+const SCHEME_HUES = {
+  claude:  [15, 18, 21, 24],
+  gpt:     [224, 220, 216, 212],
+  minimax: [126, 130, 134, 138],
+};
+const TIER_LIGHTNESS  = [25, 40, 60, 80];
+const TIER_SATURATION = [45, 60, 78, 90];
+
+// Performance tier per canonical model. Tier 3 = brightest (Fable, Astra),
+// tier 2 = Opus/Sol, tier 1 = Sonnet/Terra/MiniMax-M3, tier 0 = Haiku/Luna/M2.7.
+const MODEL_TIERS = {
+  'Fable':         { family: 'claude',  tier: 3 },
+  'GPT-6 Astra':   { family: 'gpt',     tier: 3 },
+  'Opus':          { family: 'claude',  tier: 2 },
+  'Opus 5':        { family: 'claude',  tier: 2 },
+  'GPT-5.6 Sol':   { family: 'gpt',     tier: 2 },
+  'Sonnet 4.6':    { family: 'claude',  tier: 1 },
+  'Sonnet 5':      { family: 'claude',  tier: 1 },
+  'GPT-5.6 Terra': { family: 'gpt',     tier: 1 },
+  'MiniMax-M3':    { family: 'minimax', tier: 1 },
+  'Haiku 4.5':     { family: 'claude',  tier: 0 },
+  'GPT-5.6 Luna':  { family: 'gpt',     tier: 0 },
+  'MiniMax M2.7':  { family: 'minimax', tier: 0 },
+};
+
+function colorFor(model) {
+  const info = MODEL_TIERS[model];
+  if (!info) return sessionColor(model); // session IDs / unknown → hash palette
+  const h = SCHEME_HUES[info.family][info.tier];
+  return `hsl(${h} ${TIER_SATURATION[info.tier]}% ${TIER_LIGHTNESS[info.tier]}%)`;
+}
+
+// Sessions get a stable palette independent of model prefix family.
 function hashKey(s) {
   let h = 5381;
   const str = String(s ?? '');
@@ -7,37 +42,41 @@ function hashKey(s) {
   return h;
 }
 const PALETTE = ['#a479e2', '#4a86e8', '#16a766', '#fad165', '#ffad47', '#fb4c2f', '#999999', '#f691b3', '#43d692', '#ff7537', '#7bd3f7', '#b9e4d0'];
-function colorFor(s) { return PALETTE[hashKey(s) % PALETTE.length]; }
+function sessionColor(s) { return PALETTE[hashKey(s) % PALETTE.length]; }
 
 // Map raw model names (as stored in the DB) to canonical display names.
 // Multiple raw names that map to the same canonical will have their stats
 // summed client-side (see aggregateByCanonical below).
 const MODEL_ALIASES = {
+  // Fable (top tier)
+  'fable':                       'Fable',
+  'claude-fable':                'Fable',
   // Sonnet 4.6 variants
-  'claude-sonnet-4-6':       'Sonnet 4.6',
-  'claude-sonnet-4-6[1m]':   'Sonnet 4.6',
-  'sonnet[1m]':               'Sonnet 4.6',
-  'sonnet':                   'Sonnet 4.6',
+  'claude-sonnet-4-6':           'Sonnet 4.6',
+  'claude-sonnet-4-6[1m]':       'Sonnet 4.6',
+  'sonnet[1m]':                  'Sonnet 4.6',
+  'sonnet':                      'Sonnet 4.6',
   // Haiku 4.5 variants
-  'claude-haiku-4-5':                'Haiku 4.5',
-  'claude-haiku-4-5-20251001':       'Haiku 4.5',
-  'haiku':                           'Haiku 4.5',
+  'claude-haiku-4-5':            'Haiku 4.5',
+  'claude-haiku-4-5-20251001':   'Haiku 4.5',
+  'haiku':                       'Haiku 4.5',
   // Opus variants
-  'claude-opus':              'Opus',
-  'claude-opus-4-7':          'Opus',
-  'claude-opus-4-8':          'Opus',
-  'claude-opus-5':            'Opus 5',
-  'opus':                     'Opus',
-  // Opus/Sonnet 5 variants
-  'claude-sonnet-5':          'Sonnet 5',
-  // Codex model variants
-  'gpt-5.6-luna':             'GPT-5.6 Luna',
-  'gpt-5.6-terra':            'GPT-5.6 Terra',
-  'gpt-5.6-sol':              'GPT-5.6 Sol',
-  'gpt-6-astra':              'GPT-6 Astra',
-  // MiniMax variants
-  'minimax':                  'MiniMax',
-  'minimax-m2.7':             'MiniMax M2.7',
+  'claude-opus':                 'Opus',
+  'claude-opus-4-7':             'Opus',
+  'claude-opus-4-8':             'Opus',
+  'claude-opus-5':               'Opus 5',
+  'opus':                        'Opus',
+  // Sonnet 5
+  'claude-sonnet-5':             'Sonnet 5',
+  // GPT / Codex variants
+  'gpt-5.6-luna':                'GPT-5.6 Luna',
+  'gpt-5.6-terra':               'GPT-5.6 Terra',
+  'gpt-5.6-sol':                 'GPT-5.6 Sol',
+  'gpt-6-astra':                 'GPT-6 Astra',
+  // MiniMax variants — bare `minimax` is the current M3 build
+  'minimax':                     'MiniMax-M3',
+  'minimax-m3':                  'MiniMax-M3',
+  'minimax-m2.7':                'MiniMax M2.7',
 };
 
 function canonicalModel(name) {
