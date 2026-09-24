@@ -16,12 +16,17 @@ const MODEL_TIERS = {
   'GPT-6 Astra':   { family: 'gpt',     tier: 3 },
   'Opus':          { family: 'claude',  tier: 2 },
   'Opus 5':        { family: 'claude',  tier: 2 },
+  'Opus 5.5':      { family: 'claude',  tier: 2 },
+  'GPT-6-Sol':     { family: 'gpt',     tier: 2 },
   'GPT-5.6 Sol':   { family: 'gpt',     tier: 2 },
   'Sonnet 4.6':    { family: 'claude',  tier: 1 },
   'Sonnet 5':      { family: 'claude',  tier: 1 },
+  'Sonnet 5.5':    { family: 'claude',  tier: 1 },
   'GPT-5.6 Terra': { family: 'gpt',     tier: 1 },
   'MiniMax-M3':    { family: 'minimax', tier: 1 },
   'Haiku 4.5':     { family: 'claude',  tier: 0 },
+  'Haiku 5.5':     { family: 'claude',  tier: 0 },
+  'GPT-6-Luna':    { family: 'gpt',     tier: 0 },
   'GPT-5.6 Luna':  { family: 'gpt',     tier: 0 },
   'MiniMax M2.7':  { family: 'minimax', tier: 0 },
 };
@@ -65,18 +70,25 @@ const MODEL_ALIASES = {
   'claude-opus-4-7':             'Opus',
   'claude-opus-4-8':             'Opus',
   'claude-opus-5':               'Opus 5',
+  'claude-opus-5-5':             'Opus 5.5',
   'opus':                        'Opus',
   // Sonnet 5
   'claude-sonnet-5':             'Sonnet 5',
+  'claude-sonnet-5-5':           'Sonnet 5.5',
   // GPT / Codex variants
+  'gpt-6-luna':                  'GPT-6-Luna',
+  'gpt-6-sol':                   'GPT-6-Sol',
   'gpt-5.6-luna':                'GPT-5.6 Luna',
   'gpt-5.6-terra':               'GPT-5.6 Terra',
   'gpt-5.6-sol':                 'GPT-5.6 Sol',
   'gpt-6-astra':                 'GPT-6 Astra',
   // MiniMax variants — bare `minimax` is the current M3 build
   'minimax':                     'MiniMax-M3',
+  'minimax[1m]':                 'MiniMax-M3',
   'minimax-m3':                  'MiniMax-M3',
   'minimax-m2.7':                'MiniMax M2.7',
+  // Haiku 5.5
+  'claude-haiku-5-5':            'Haiku 5.5',
 };
 
 function canonicalModel(name) {
@@ -92,6 +104,35 @@ function aggregateByCanonical(rows, numericKeys) {
     for (const k of numericKeys) acc[key][k] += r[k] ?? 0;
   }
   return order.map((k) => acc[k]);
+}
+
+function aggregateTokensByModelEffort(rows) {
+  const grouped = new Map();
+  for (const row of rows ?? []) {
+    const model = canonicalModel(row.model);
+    const effort = typeof row.effort === 'string' && row.effort ? row.effort : 'unspecified';
+    const key = JSON.stringify([model, effort]);
+    let item = grouped.get(key);
+    if (!item) {
+      item = { model, effort, requests: 0, tokens: 0 };
+      grouped.set(key, item);
+    }
+    item.requests += Number(row.requests ?? 0);
+    item.tokens += Number(row.tokens ?? 0);
+  }
+  return [...grouped.values()].sort((a, b) =>
+    b.tokens - a.tokens || a.model.localeCompare(b.model) || a.effort.localeCompare(b.effort),
+  );
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char]);
 }
 
 const charts = {};
@@ -178,6 +219,21 @@ async function refresh() {
       <td>${r.errors}</td>
     </tr>
   `).join('');
+
+  // The API keeps the raw effort string so provider-specific values such as
+  // Claude's `xhigh` and Codex's `max` remain distinct in the breakdown.
+  const effortTable = document.querySelector('#table-model-effort tbody');
+  if (effortTable) {
+    const rows = aggregateTokensByModelEffort(data.tokensByModelEffort);
+    effortTable.innerHTML = rows.map((r) => `
+    <tr>
+      <td><span class="session-swatch" style="background:${colorFor(r.model)}"></span>${escapeHtml(r.model)}</td>
+      <td>${escapeHtml(r.effort === 'unspecified' ? 'Unspecified' : r.effort)}</td>
+      <td>${abbrev(r.requests)}</td>
+      <td>${abbrev(r.tokens)}</td>
+    </tr>
+  `).join('') || '<tr><td colspan="4">none</td></tr>';
+  }
 
   // Top sessions
   document.querySelector('#table-sessions tbody').innerHTML = (data.topSessions ?? []).map((r) => `

@@ -155,7 +155,15 @@ export function applyThinkingCompat(body, upstreamName) {
   body.thinking = { type: 'adaptive' };
 }
 
+function effortFromRequestBody(body) {
+  for (const effort of [body?.output_config?.effort, body?.reasoning?.effort]) {
+    if (typeof effort === 'string' && effort.length > 0) return effort;
+  }
+  return null;
+}
+
 export function forward(req, res, conn, outBody, { id, t0, session, model, realModel, reqBody, upstreamRequestPath = req.url }) {
+  const effort = effortFromRequestBody(reqBody);
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
   // Prevent upstream from gzip-encoding the response — the router reads the raw
@@ -184,6 +192,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       id,
       model: fields.model,
       real_model: fields.real_model,
+      effort,
       upstream: fields.upstream,
       status: fields.status,
       durationMs: fields.durationMs,

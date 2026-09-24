@@ -103,6 +103,28 @@ export function topModels(db, range = '7d', limit = 5) {
   `).all(...bindRange(range), limit);
 }
 
+// Total token usage grouped by the model and the effort requested for each
+// event. Read raw events so the existing model-only rollup keys stay intact.
+export function tokensByModelEffort(db, range = '7d') {
+  const hasEffort = db.prepare('PRAGMA table_info(events)').all().some((column) => column.name === 'effort');
+  const effortExpr = hasEffort ? "COALESCE(NULLIF(effort, ''), 'unspecified')" : "'unspecified'";
+  return db.prepare(`
+    SELECT model,
+           ${effortExpr} AS effort,
+           COUNT(*) AS requests,
+           SUM(input_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens) AS tokens
+    FROM events
+    WHERE ${withRange(range)}
+    GROUP BY model, ${effortExpr}
+    ORDER BY tokens DESC, model, effort
+  `).all(...bindRange(range)).map((row) => ({
+    model: row.model,
+    effort: row.effort,
+    requests: Number(row.requests),
+    tokens: Number(row.tokens),
+  })).filter((row) => Number.isFinite(row.tokens));
+}
+
 export function topSessions(db, range = '7d', limit = 5) {
   return db.prepare(`
     SELECT session_id,

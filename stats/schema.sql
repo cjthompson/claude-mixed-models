@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS events (
   ts                          TEXT NOT NULL,
   model                       TEXT NOT NULL,   -- client-requested alias
   real_model                  TEXT NOT NULL,   -- resolved upstream model
+  effort                      TEXT,            -- request effort setting; NULL when absent
   upstream                    TEXT NOT NULL,
   status                      INTEGER NOT NULL,
   duration_ms                 INTEGER NOT NULL,

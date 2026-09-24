@@ -35,6 +35,7 @@ function bucketEnd(bucketIso, grain) {
 // first. Each entry: { table, column, type }. The function is a no-op
 // for any column that's already present.
 const MIGRATIONS = [
+  { table: 'events',   column: 'effort',               type: 'TEXT' },
   // 2026-06-13: cache TTL split + thinking tokens
   { table: 'events',   column: 'cache_5m_input_tokens', type: 'INTEGER NOT NULL DEFAULT 0' },
   { table: 'events',   column: 'cache_1h_input_tokens', type: 'INTEGER NOT NULL DEFAULT 0' },
@@ -149,10 +150,10 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
   const db = openAndMigrateDb(dbPath, schemaPath);
 
   const insertEvent = db.prepare(`
-    INSERT OR IGNORE INTO events (id, ts, model, real_model, upstream, status, duration_ms, session_id,
+    INSERT OR IGNORE INTO events (id, ts, model, real_model, effort, upstream, status, duration_ms, session_id,
                                   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
                                   cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const touched = new Set();   // `${grain}|${bucketStart}|${model}|${upstream}`
@@ -165,7 +166,7 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
       // The router writes 'cache_read_input_tokens' / 'cache_creation_input_tokens' / 'sessionId';
       // normalize to the column names used in the schema.
       const result = insertEvent.run(
-        rec.id, rec.ts, rec.model, rec.real_model, rec.upstream, rec.status, rec.durationMs,
+        rec.id, rec.ts, rec.model, rec.real_model, rec.effort ?? null, rec.upstream, rec.status, rec.durationMs,
         rec.sessionId ?? null,
         rec.input_tokens ?? 0, rec.output_tokens ?? 0,
         rec.cache_read_input_tokens ?? 0, rec.cache_creation_input_tokens ?? 0,
