@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, mkdirSync, writeFileSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
+import { logger } from '../../lib/logger.js';
 
 const JSONL_PATH = process.env.STATS_EVENTS_FILE ?? '/tmp/claude-mixed-models/router.events.jsonl';
 const DB_PATH    = process.env.STATS_DB_PATH ?? `${process.env.HOME}/.local/state/claude-mixed-models/router.stats.db`;
@@ -240,12 +241,12 @@ export function installShutdown({ runOnceFn = runOnce, exit = process.exit } = {
       .then((result) => {
         const inserted = result?.inserted ?? 0;
         if (inserted === 0) {
-          console.log('[stats-batcher] shutdown: no pending events to flush');
+          logger.info('[stats-batcher] shutdown: no pending events to flush');
         } else {
-          console.log(`[stats-batcher] shutdown: flushed ${inserted} event(s) to DB`);
+          logger.info(`[stats-batcher] shutdown: flushed ${inserted} event(s) to DB`);
         }
       })
-      .catch((err) => console.error('[stats-batcher] shutdown: final flush failed:', err.message))
+      .catch((err) => logger.error('[stats-batcher] shutdown: final flush failed:', err.message))
       .finally(() => exit(0));
   };
   process.on('SIGTERM', onShutdownSignal);
@@ -271,7 +272,7 @@ async function mainLoop() {
     try {
       await runOnce();
     } catch (err) {
-      console.error('[stats-batcher] runOnce error:', err.message);
+      logger.error('[stats-batcher] runOnce error:', err.message);
     }
   };
 
@@ -295,11 +296,11 @@ async function mainLoop() {
         const age = row ? now - new Date(row.last_refresh).getTime() : Infinity;
         if (age >= FULL_REFRESH_MS[grain]) {
           const n = fullRefreshGrain(db, grain);
-          console.log(`[stats-batcher] full refresh ${grain}: ${n} buckets`);
+          logger.info(`[stats-batcher] full refresh ${grain}: ${n} buckets`);
         }
       }
     } catch (err) {
-      console.error('[stats-batcher] refresh error:', err.message);
+      logger.error('[stats-batcher] refresh error:', err.message);
     } finally {
       db.close();
     }
@@ -324,7 +325,7 @@ async function mainLoop() {
 // `runOnce` is exported for tests. If invoked directly (as the entry point), start the main loop.
 if (import.meta.url === `file://${process.argv[1]}`) {
   mainLoop().catch((err) => {
-    console.error('[stats-batcher] fatal:', err);
+    logger.error('[stats-batcher] fatal:', err);
     process.exit(1);
   });
 }

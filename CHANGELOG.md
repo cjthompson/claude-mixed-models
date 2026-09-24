@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-09-24
+
+### lib/logger.js implementation plan (P002)
+- Create lib/logger.js + lib/logger.test.js (TDD, 10 cases)
+- Isolate LOG_LEVEL/DEBUG in test console-capture helpers
+- Document LOG_LEVEL/DEBUG in .env.example
+- Migrate router/server.js to logger (atomic logReq/logRes swap)
+- Migrate proxy/server.js to logger (atomic logReq/logRes swap)
+- Migrate stats/workers/batcher.mjs to logger
+- Migrate stats/workers/server.mjs to logger
+- Migrate bin/stats-cli.mjs error path to logger
+- Migrate lib/event.js logEvent failure to logger
+- Make server.backoff.mjs default log level-aware
+- Migrate debug-webfetch-400.mjs transport-error branch to logger
+
 ## 2026-09-11
 
 ### Tasks

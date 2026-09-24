@@ -15,6 +15,7 @@ import {
   rangeTotals,
   thinkingByModel,
 } from '../queries.mjs';
+import { logger } from '../../lib/logger.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DB_PATH  = process.env.STATS_DB_PATH  ?? `${process.env.HOME}/.local/state/claude-mixed-models/router.stats.db`;
@@ -72,7 +73,7 @@ function buildApiHandler(dbPath) {
       res.writeHead(200, { 'content-type': 'application/json', 'etag': etag });
       res.end(json);
     } catch (err) {
-      console.error('[stats-server] query error:', err.message);
+      logger.error('[stats-server] query error:', err.message);
       res.writeHead(500, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
     }
@@ -121,11 +122,11 @@ export async function startServer({ dbPath = DEFAULT_DB_PATH, port = DEFAULT_POR
 // Install graceful shutdown when run as the main module.
 if (import.meta.url === `file://${process.argv[1]}`) {
   startServer().then(({ url }) => {
-    console.log(`[stats-server] dashboard at ${url}`);
+    logger.info(`[stats-server] dashboard at ${url}`);
     process.on('SIGTERM', () => process.exit(0));
     process.on('SIGINT',  () => process.exit(0));
   }).catch((err) => {
-    console.error('[stats-server] fatal:', err);
+    logger.error('[stats-server] fatal:', err);
     process.exit(1);
   });
 }

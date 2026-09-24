@@ -13,6 +13,7 @@
 //   1 otherwise.
 
 import http from 'node:http';
+import { logger } from '../lib/logger.js';
 
 const ROUTER_URL = process.env.ROUTER_URL ?? 'http://localhost:8788';
 const ROUTER_PATH = process.env.ROUTER_PATH ?? '/v1/messages?beta=true';
@@ -91,8 +92,8 @@ const failures = [];
   try {
     result = await post(ROUTER_URL, ROUTER_PATH, baseBody());
   } catch (err) {
-    console.log(`  ✗ transport error: ${err.message}`);
-    console.log(`  (is the router running? expected at ${ROUTER_URL})`);
+    logger.error(`  ✗ transport error: ${err.message}`);
+    logger.error(`  (is the router running? expected at ${ROUTER_URL})`);
     process.exit(1);
   }
   console.log(`  ← status=${result.status} body=${preview(result.body)}`);

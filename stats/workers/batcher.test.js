@@ -9,6 +9,19 @@ import { join } from 'node:path';
 // We import the batcher's runOnce() so we can drive a single pass without spawning a process.
 import { runOnce, installShutdown } from './batcher.mjs';
 
+// Clears LOG_LEVEL/DEBUG for the duration of a test and returns a restore fn
+// that puts back the prior values (delete only if originally unset).
+function isolateLogEnv() {
+  const saved = { LOG_LEVEL: process.env.LOG_LEVEL, DEBUG: process.env.DEBUG };
+  delete process.env.LOG_LEVEL;
+  delete process.env.DEBUG;
+  return () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  };
+}
+
 function freshPaths() {
   const dir = mkdtempSync(join(tmpdir(), 'batcher-test-'));
   return {
@@ -261,12 +274,14 @@ test('installShutdown: logs a no-flush-needed line when runOnce inserts zero eve
   const lines = [];
   const originalLog = console.log;
   console.log = (msg) => lines.push(msg);
+  const restoreEnv = isolateLogEnv();
   const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
   try {
     await onShutdownSignal();
   } finally {
     console.log = originalLog;
     uninstall();
+    restoreEnv();
   }
   assert.equal(lines.length, 1);
   assert.match(lines[0], /\[stats-batcher\] shutdown: no pending events to flush/);
@@ -278,12 +293,14 @@ test('installShutdown: logs a success line with the inserted count when runOnce 
   const lines = [];
   const originalLog = console.log;
   console.log = (msg) => lines.push(msg);
+  const restoreEnv = isolateLogEnv();
   const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
   try {
     await onShutdownSignal();
   } finally {
     console.log = originalLog;
     uninstall();
+    restoreEnv();
   }
   assert.equal(lines.length, 1);
   assert.match(lines[0], /\[stats-batcher\] shutdown: flushed 42 event\(s\) to DB/);
@@ -295,12 +312,14 @@ test('installShutdown: logs a failure line via console.error when runOnce reject
   const lines = [];
   const originalError = console.error;
   console.error = (...args) => lines.push(args.join(' '));
+  const restoreEnv = isolateLogEnv();
   const { onShutdownSignal, uninstall } = installShutdown({ runOnceFn, exit });
   try {
     await onShutdownSignal();
   } finally {
     console.error = originalError;
     uninstall();
+    restoreEnv();
   }
   assert.equal(lines.length, 1);
   assert.match(lines[0], /\[stats-batcher\] shutdown: final flush failed:/);

@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { resolveRoute } from './routes.js';
-import { newRequestId, logReq, logRes, sessionIdFromUserId } from '../lib/log.js';
+import { newRequestId, sessionIdFromUserId } from '../lib/log.js';
+import { logger } from '../lib/logger.js';
 import { SseLineScanner } from '../lib/sse.js';
 import { normalizeUsage } from '../lib/usage.js';
 import { logEvent } from '../lib/event.js';
@@ -81,7 +82,7 @@ export function warnIfInsecureUpstream(url, name, auth) {
   if (isLoopbackHost(url.hostname)) return;
   if (warnedInsecureUpstreams.has(name)) return;
   warnedInsecureUpstreams.add(name);
-  console.error(
+  logger.warn(
     `[router] WARNING: upstream '${name}' is configured with http: to a non-loopback host (${url.hostname}). ` +
     `Its API key will be sent in cleartext. Use https: unless this upstream is trusted and local-only.`
   );
@@ -139,7 +140,7 @@ export function applyToolCompat(body, upstreamName) {
       patched++;
     }
   }
-  if (patched > 0) console.error(`[tool-compat] injected input_schema on ${patched} tool entry/entries for ${upstreamName}`);
+  if (patched > 0) logger.debug(`[tool-compat] injected input_schema on ${patched} tool entry/entries for ${upstreamName}`);
 }
 
 // Force thinking mode on for every MiniMax request. MiniMax-M3 defaults to
@@ -186,7 +187,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
   const finalize = (fields) => {
     if (done) return;
     done = true;
-    logRes(id, fields);
+    logger.res(id, fields);
     // Best-effort event sink. Fire-and-forget; errors are swallowed inside logEvent.
     logEvent({
       id,
@@ -250,7 +251,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
           // to a genuine empty 200 from the upstream's point of view. Don't
           // blame the upstream for our own teardown.
           if (!routerShuttingDown) {
-            console.error(`[UPSTREAM EMPTY RESPONSE] upstream=${conn.url.host} sent HTTP 200 with empty body`);
+            logger.error(`[UPSTREAM EMPTY RESPONSE] upstream=${conn.url.host} sent HTTP 200 with empty body`);
           }
           if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
           if (!res.writableEnded) res.end(JSON.stringify({ error: 'upstream returned empty response (HTTP 200)' }));
@@ -305,7 +306,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
     });
   });
   upstreamReq.on('error', (err) => {
-    console.error('[ROUTER UPSTREAM ERROR]', err.message);
+    logger.error('[ROUTER UPSTREAM ERROR]', err.message);
     if (!res.headersSent) res.writeHead(502);
     if (!res.writableEnded) res.end('upstream error');
     // Emit a RES line for the failed request so it shows up in logs.
@@ -352,7 +353,7 @@ function stripOpenAiPrefix(url) {
 // forwards to the chosen upstream.
 export function handleRequest(req, res) {
   const chunks = [];
-  req.on('error', (e) => console.error('[REQ ERROR]', e.message));
+  req.on('error', (e) => logger.error('[REQ ERROR]', e.message));
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
     const raw = Buffer.concat(chunks);
@@ -433,7 +434,7 @@ export function handleRequest(req, res) {
     }
 
     const session = sessionIdFromUserId(parsedBody?.metadata?.user_id);
-    logReq(id, {
+    logger.req(id, {
       model: parsedBody?.model,
       upstream: conn.url.host,
       session,
@@ -479,7 +480,7 @@ export function installShutdown(srv, { exit = process.exit } = {}) {
     socket.on('close', () => {
       openConnections.delete(socket);
       if (shuttingDown) {
-        console.log(`[shutdown] connection closed (${openConnections.size} remaining)`);
+        logger.info(`[shutdown] connection closed (${openConnections.size} remaining)`);
         if (openConnections.size === 0) exit(exitCode);
       }
     });
@@ -490,18 +491,18 @@ export function installShutdown(srv, { exit = process.exit } = {}) {
   // process signal to exercise the state machine.
   const onSignal = (signal) => {
     if (shuttingDown) {
-      console.log(`[shutdown] received second signal (${signal}), forcing immediate shutdown (${openConnections.size} connection(s) still open)`);
+      logger.info(`[shutdown] received second signal (${signal}), forcing immediate shutdown (${openConnections.size} connection(s) still open)`);
       for (const s of openConnections) s.destroy();
       exit(exitCode);
       return;
     }
     shuttingDown = true;
     routerShuttingDown = true;
-    console.log(`[shutdown] received ${signal}, beginning graceful shutdown (${openConnections.size} open connection(s))`);
+    logger.info(`[shutdown] received ${signal}, beginning graceful shutdown (${openConnections.size} open connection(s))`);
     srv.close((err) => {
       if (err) {
         exitCode = 1;
-        console.error('[shutdown] server.close error:', err.message);
+        logger.error('[shutdown] server.close error:', err.message);
       }
       if (openConnections.size === 0) exit(exitCode);
     });
@@ -540,9 +541,9 @@ const isEntry = process.argv[1] && pathToFileURL(process.argv[1]).href === impor
 if (isEntry) {
   const server = createServer();
   listenRouter(server, PORT, ROUTER_HOST, () => {
-    console.log(`Router on http://localhost:${PORT}`);
-    console.log(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
-    console.log(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);
+    logger.info(`Router on http://localhost:${PORT}`);
+    logger.info(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
+    logger.info(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);
     // Yellow banner confirms colorized log code is loaded. If you don't see
     // this in yellow, you're running the wrong code (or a version without
     // color support).
@@ -552,7 +553,7 @@ if (isEntry) {
     } catch {
       // Not running from a git checkout; the banner is best-effort.
     }
-    console.log(`\x1b[33m[router] log color enabled (commit HEAD = ${headSha})\x1b[0m`);
+    logger.info(`\x1b[33m[router] log color enabled (commit HEAD = ${headSha})\x1b[0m`);
   });
   installShutdown(server);
 }

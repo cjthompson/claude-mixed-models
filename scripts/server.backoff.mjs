@@ -27,8 +27,11 @@
 // an intentional exit. The healthy-run/crash combo only resets the retry
 // counter to attempt 1 instead of inheriting a stale streak.
 //
-// `log` defaults to console.error so launchd captures messages into
-// stats/server.err.log alongside the orchestrator's own stderr.
+// `log(line, level)` defaults to the shared logger (lib/logger.js):
+// 'info' goes to stdout (stats/server.log); 'warn'/'error' go to
+// stderr (stats/server.err.log). Custom `log` functions may ignore `level`.
+
+import { logger } from '../lib/logger.js';
 
 const DEFAULT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 const DEFAULT_HEALTHY_MS = 5000;
@@ -43,7 +46,7 @@ export function createBackoff(opts = {}) {
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const healthyMs   = opts.healthyMs   ?? DEFAULT_HEALTHY_MS;
   const delaysMs    = opts.delaysMs    ?? DEFAULT_DELAYS_MS;
-  const log         = opts.log         ?? ((line) => console.error(line));
+  const log         = opts.log         ?? ((line, level = 'error') => logger[level](line));
 
   // Per-script state: { attempt, startedAt }.
   const state = new Map();
@@ -71,18 +74,18 @@ export function createBackoff(opts = {}) {
     if (healthy) s.attempt = 0;
 
     if (healthy && clean) {
-      log(`[stats] ${script} exited (code=${code} signal=${signal}, lived=${Math.round(lived / 1000)}s, healthy) — resetting retry counter`);
+      log(`[stats] ${script} exited (code=${code} signal=${signal}, lived=${Math.round(lived / 1000)}s, healthy) — resetting retry counter`, 'info');
       return { action: 'noop' };
     }
 
     s.attempt += 1;
     if (s.attempt >= maxAttempts) {
-      log(`[stats] ${script} crashed ${s.attempt} times in a row (last: code=${code} signal=${signal}); giving up. launchd will restart the orchestrator.`);
+      log(`[stats] ${script} crashed ${s.attempt} times in a row (last: code=${code} signal=${signal}); giving up. launchd will restart the orchestrator.`, 'error');
       return { action: 'give-up', exitCode: 1, attempt: s.attempt };
     }
 
     const delayMs = delayFor(s.attempt, delaysMs);
-    log(`[stats] ${script} exited (code=${code} signal=${signal}, lived=${Math.round(lived / 1000)}s); retry ${s.attempt}/${maxAttempts} in ${Math.round(delayMs / 1000)}s`);
+    log(`[stats] ${script} exited (code=${code} signal=${signal}, lived=${Math.round(lived / 1000)}s); retry ${s.attempt}/${maxAttempts} in ${Math.round(delayMs / 1000)}s`, 'warn');
     return { action: 'respawn', delayMs, attempt: s.attempt };
   }
 

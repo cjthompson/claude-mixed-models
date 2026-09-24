@@ -28,7 +28,11 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED ||= '0';
 // logEvent call inside finalize() doesn't write to /tmp. Cleared in afterEach
 // so a stray file from a test can't leak into the next.
 let statsDir;
+let savedLogEnv;
 beforeEach(() => {
+  savedLogEnv = { LOG_LEVEL: process.env.LOG_LEVEL, DEBUG: process.env.DEBUG };
+  delete process.env.LOG_LEVEL;
+  delete process.env.DEBUG;
   statsDir = mkdtempSync(join(tmpdir(), 'router-stats-'));
   process.env.STATS_EVENTS_FILE = join(statsDir, 'events.jsonl');
 });
@@ -40,6 +44,8 @@ afterEach(() => {
   // catches any test that throws before reaching that reset, so a later
   // test never silently inherits "shutting down" state from an earlier one.
   __setRouterShuttingDownForTest(false);
+  if (savedLogEnv.LOG_LEVEL === undefined) delete process.env.LOG_LEVEL; else process.env.LOG_LEVEL = savedLogEnv.LOG_LEVEL;
+  if (savedLogEnv.DEBUG === undefined) delete process.env.DEBUG; else process.env.DEBUG = savedLogEnv.DEBUG;
 });
 
 test('router bind defaults to all interfaces and honors ROUTER_HOST overrides', async () => {
@@ -149,11 +155,24 @@ test('handleRequest: rejects non-loopback HTTP subscription override before forw
 // logs a one-time warning (no secret) for that case; every other combination
 // (https:, loopback host, or passthrough auth) is silent.
 
+// Clears LOG_LEVEL/DEBUG while capturing so logger-gated warnings are
+// asserted at the default (info) threshold regardless of the caller's env.
 function captureConsoleError() {
   const captured = [];
   const orig = console.error;
+  const savedLogLevel = process.env.LOG_LEVEL;
+  const savedDebug = process.env.DEBUG;
+  delete process.env.LOG_LEVEL;
+  delete process.env.DEBUG;
   console.error = (line) => captured.push(line);
-  return { lines: captured, restore: () => { console.error = orig; } };
+  return {
+    lines: captured,
+    restore: () => {
+      console.error = orig;
+      if (savedLogLevel === undefined) delete process.env.LOG_LEVEL; else process.env.LOG_LEVEL = savedLogLevel;
+      if (savedDebug === undefined) delete process.env.DEBUG; else process.env.DEBUG = savedDebug;
+    },
+  };
 }
 
 test('warnIfInsecureUpstream: warns once for a keyed http: upstream on a non-loopback host', () => {
@@ -932,8 +951,19 @@ test('forward: empty-body HTTP 200 during a shutdown drain — still 502s the cl
 function captureConsoleLog() {
   const captured = [];
   const orig = console.log;
+  const savedLogLevel = process.env.LOG_LEVEL;
+  const savedDebug = process.env.DEBUG;
+  delete process.env.LOG_LEVEL;
+  delete process.env.DEBUG;
   console.log = (line) => captured.push(line);
-  return { lines: captured, restore: () => { console.log = orig; } };
+  return {
+    lines: captured,
+    restore: () => {
+      console.log = orig;
+      if (savedLogLevel === undefined) delete process.env.LOG_LEVEL; else process.env.LOG_LEVEL = savedLogLevel;
+      if (savedDebug === undefined) delete process.env.DEBUG; else process.env.DEBUG = savedDebug;
+    },
+  };
 }
 
 test('installShutdown: graceful — logs initial open count, drains, then exits', async () => {

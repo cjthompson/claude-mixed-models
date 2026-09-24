@@ -10,6 +10,7 @@ import {
   errorsByStatus,
   todaysTotals,
 } from '../stats/queries.mjs';
+import { logger } from '../lib/logger.js';
 
 const DB_PATH = process.env.STATS_DB_PATH ?? `${process.env.HOME}/.local/state/claude-mixed-models/router.stats.db`;
 const WATCH = process.argv.includes('--watch');
@@ -93,7 +94,7 @@ function main() {
         console.log(renderCards(db));
         db.close();
       } catch (err) {
-        console.error('error:', err.message);
+        logger.error('error:', err.message);
       }
     };
     render();
