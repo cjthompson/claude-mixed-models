@@ -90,6 +90,14 @@ function dropStaleRollups(db) {
     const pkCols = db.prepare(`SELECT name FROM pragma_table_info('rollup_${grain}') WHERE pk > 0 ORDER BY pk`).all().map((r) => r.name);
     if (!pkCols.includes('real_model')) {
       db.exec(`DROP TABLE rollup_${grain}`);
+      // Clear the matching rollup_refresh entry so the next refreshTick
+      // doesn't skip this grain as "recently refreshed" and leave the
+      // freshly-recreated (empty) rollup table unpopulated. Without
+      // this, the 1h/1d refresh on the post-migration startup compares
+      // against a pre-drop timestamp and skips — historical data is then
+      // missing from those tables until enough wall-clock time passes
+      // for the refresh interval to elapse.
+      db.prepare('DELETE FROM rollup_refresh WHERE grain = ?').run(grain);
     }
   }
 }

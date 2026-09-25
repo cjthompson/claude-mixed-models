@@ -335,6 +335,66 @@ test('runOnce: applyMigrations drops pre-real_model rollup tables so the new PK 
   }
 });
 
+// Companion to the previous test: dropStaleRollups clears rollup_refresh for
+// the dropped table. Without this, refreshTick on the next startup compares
+// against the pre-drop last_refresh and skips the grain — leaving the freshly
+// recreated (empty) rollup table unpopulated. 1h/1d only refresh every 60 min
+// / 24 h, so a missed refresh on the post-migration startup leaves the
+// dashboard's 24h / 7d / 30d / all-time views empty until the next time the
+// refresh interval happens to elapse. Dropping the matching rollup_refresh
+// entry forces the next refreshTick to see age = Infinity and repopulate
+// the table from events.
+test('runOnce: dropStaleRollups clears the matching rollup_refresh entry so the post-migration refresh fires', async () => {
+  const { jsonlPath, dbPath, cleanup } = freshPaths();
+  try {
+    // Seed the rollup tables and rollup_refresh as if a previous-version
+    // batcher had run: rollup_5m has rows, rollup_refresh has entries.
+    fs.writeFileSync(jsonlPath, JSON.stringify({
+      id: 'a', ts: '2026-06-08T10:00:00.000Z',
+      model: 'claude-haiku-4-5', real_model: 'MiniMax-M3',
+      upstream: 'api.minimax.io', status: 200, durationMs: 1,
+      input_tokens: 0, output_tokens: 0,
+      cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+      cache_5m_input_tokens: 0, cache_1h_input_tokens: 0, thinking_tokens: 0,
+    }) + '\n');
+    await runOnce({ jsonlPath, dbPath });
+
+    // Simulate the upgrade: recreate rollup_5m with the OLD PK and seed
+    // rollup_refresh for both 5m and 1h with timestamps that would normally
+    // make refreshTick skip them.
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE rollup_5m_old AS SELECT bucket_start, model, real_model, upstream, requests, errors,
+                                       input_tokens, output_tokens, cache_read, cache_write,
+                                       cache_5m, cache_1h, thinking, p50_ms, p95_ms
+                                FROM rollup_5m;
+      DROP TABLE rollup_5m;
+      ALTER TABLE rollup_5m_old RENAME TO rollup_5m;
+    `);
+    db.prepare('INSERT OR REPLACE INTO rollup_refresh (grain, last_refresh) VALUES (?, ?)')
+      .run('5m', new Date(Date.now() - 60_000).toISOString());
+    db.prepare('INSERT OR REPLACE INTO rollup_refresh (grain, last_refresh) VALUES (?, ?)')
+      .run('1h', new Date(Date.now() - 30 * 60_000).toISOString());
+    db.close();
+
+    // Second pass: dropStaleRollups should drop rollup_5m AND clear its
+    // rollup_refresh entry. The 1h entry was never dropped (PK was fine)
+    // and must remain.
+    fs.writeFileSync(jsonlPath, '');
+    await runOnce({ jsonlPath, dbPath });
+
+    const db2 = new DatabaseSync(dbPath);
+    const refreshGrains = new Set(db2.prepare('SELECT grain FROM rollup_refresh').all().map((r) => r.grain));
+    assert.ok(!refreshGrains.has('5m'),
+      `rollup_refresh for 5m should be cleared when rollup_5m is dropped, got: ${JSON.stringify([...refreshGrains])}`);
+    assert.ok(refreshGrains.has('1h'),
+      `rollup_refresh for 1h should be preserved when its rollup table is NOT dropped, got: ${JSON.stringify([...refreshGrains])}`);
+    db2.close();
+  } finally {
+    cleanup();
+  }
+});
+
 test('installShutdown: flushes pending events via runOnce before exiting', async () => {
   const calls = [];
   let resolveRunOnce;
