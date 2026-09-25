@@ -38,6 +38,16 @@ function colorFor(model) {
   return `hsl(${h} ${TIER_SATURATION[info.tier]}% ${TIER_LIGHTNESS[info.tier]}%)`;
 }
 
+// Color a rollup/aggregated row by its real_model when one was captured,
+// falling back to the alias. Used for the top-models / effort tables so
+// every alias redirected to the same real model renders in the same
+// color (e.g. 'haiku' and 'minimax' aliases both landing on MiniMax-M3
+// share one swatch).
+function colorForRow(row) {
+  const real = row._real ?? (row.real_model ? canonicalModel(row.real_model) : null);
+  return colorFor(real ?? canonicalModel(row.model ?? row._alias ?? ''));
+}
+
 // Sessions get a stable palette independent of model prefix family.
 function hashKey(s) {
   let h = 5381;
@@ -52,6 +62,13 @@ function sessionColor(s) { return PALETTE[hashKey(s) % PALETTE.length]; }
 // Map raw model names (as stored in the DB) to canonical display names.
 // Multiple raw names that map to the same canonical will have their stats
 // summed client-side (see aggregateByCanonical below).
+//
+// Lookup is case-insensitive: the router logs `real_model: 'MiniMax-M3'`
+// while the routes.config.json alias is `'minimax-m3'`. Without lowercasing,
+// those would canonicalize to different display names — and the
+// "Haiku 4.5 (→ MiniMax-M3)" row would gain a spurious arrow because
+// `'MiniMax-M3'` and `'MiniMax-M3'` (alias-side) didn't both hit the
+// same MODEL_ALIASES entry.
 const MODEL_ALIASES = {
   // Fable (top tier)
   'fable':                       'Fable',
@@ -82,17 +99,27 @@ const MODEL_ALIASES = {
   'gpt-5.6-terra':               'GPT-5.6 Terra',
   'gpt-5.6-sol':                 'GPT-5.6 Sol',
   'gpt-6-astra':                 'GPT-6 Astra',
-  // MiniMax variants — bare `minimax` is the current M3 build
+  // MiniMax variants — bare `minimax` is the current M3 build. Both
+  // the alias side (`minimax-m3`) and the router-captured real_model
+  // (`MiniMax-M3`) need to canonicalize identically.
   'minimax':                     'MiniMax-M3',
   'minimax[1m]':                 'MiniMax-M3',
   'minimax-m3':                  'MiniMax-M3',
   'minimax-m2.7':                'MiniMax M2.7',
+  // Upstream real-model spellings (the names the upstream returns to
+  // the router) — same canonical form as their alias-side counterparts
+  // so a redirected request doesn't render with a spurious arrow just
+  // because the spelling differs in case or punctuation.
+  'minimax-m2-7':                'MiniMax M2.7',
+  'minimax-m3-20251001':         'MiniMax-M3',
   // Haiku 5.5
   'claude-haiku-5-5':            'Haiku 5.5',
 };
 
 function canonicalModel(name) {
-  return MODEL_ALIASES[name] ?? name;
+  if (name == null || name === '') return null;
+  const aliased = MODEL_ALIASES[name.toLowerCase()];
+  return aliased ?? name;
 }
 
 function aggregateByCanonical(rows, numericKeys) {
@@ -106,15 +133,61 @@ function aggregateByCanonical(rows, numericKeys) {
   return order.map((k) => acc[k]);
 }
 
+// Like aggregateByCanonical but also threads `real_model` through the
+// grouping so a row whose alias canonicalizes to one name and whose
+// real_model canonicalizes to a different name renders as
+// "Alias (→ Real)" instead of collapsing them silently. Same numeric
+// aggregation otherwise — used for the top-models / cache-rate / etc
+// tables.
+function aggregateWithRealModel(rows, numericKeys) {
+  const order = [];
+  const acc = {};
+  for (const r of rows) {
+    const alias = canonicalModel(r.model);
+    const real = r.real_model ? canonicalModel(r.real_model) : null;
+    const label = (real && real !== alias) ? `${alias} (→ ${real})` : alias;
+    if (!acc[label]) {
+      acc[label] = { model: label, _alias: alias, _real: real };
+      for (const k of numericKeys) acc[label][k] = 0;
+      order.push(label);
+    }
+    for (const k of numericKeys) acc[label][k] += r[k] ?? 0;
+  }
+  return order.map((k) => acc[k]);
+}
+
+// Sum requests/tokens by canonical real_model across all aliases that
+// were redirected to it. Used for the "Total X served" summary line so
+// the viewer can see how much of each upstream model actually ran,
+// regardless of how many aliases routed to it.
+function totalsByRealModel(rows, numericKeys) {
+  const acc = {};
+  const order = [];
+  for (const r of rows) {
+    // NULL real_model → "alias served by its own real model" — count
+    // that bucket under the canonical alias itself.
+    const real = r.real_model ? canonicalModel(r.real_model) : canonicalModel(r.model);
+    if (!acc[real]) {
+      acc[real] = { model: real };
+      for (const k of numericKeys) acc[real][k] = 0;
+      order.push(real);
+    }
+    for (const k of numericKeys) acc[real][k] += r[k] ?? 0;
+  }
+  return order.map((k) => acc[k]).sort((a, b) => (b.requests ?? 0) - (a.requests ?? 0));
+}
+
 function aggregateTokensByModelEffort(rows) {
   const grouped = new Map();
   for (const row of rows ?? []) {
-    const model = canonicalModel(row.model);
+    const alias = canonicalModel(row.model);
+    const real = row.real_model ? canonicalModel(row.real_model) : null;
+    const label = (real && real !== alias) ? `${alias} (→ ${real})` : alias;
     const effort = typeof row.effort === 'string' && row.effort ? row.effort : 'unspecified';
-    const key = JSON.stringify([model, effort]);
+    const key = JSON.stringify([label, effort]);
     let item = grouped.get(key);
     if (!item) {
-      item = { model, effort, requests: 0, tokens: 0 };
+      item = { model: label, effort, requests: 0, tokens: 0, _alias: alias, _real: real };
       grouped.set(key, item);
     }
     item.requests += Number(row.requests ?? 0);
@@ -178,47 +251,101 @@ async function refresh() {
   `;
 
   // Tokens per bucket (stacked by model). Title + label format depend on
-  // the bucket grain: 5m for sub-hour ranges, hour for 24h, day otherwise.
+  // Tokens per bucket — each stack key is an (alias, real_model) tuple
+  // (see viewer-clock.js::normalizeDashboard). Compute the display label
+  // from the tuple so redirected aliases render as "Alias (→ Real)"
+  // stacks separate from direct calls to the same upstream model. Color
+  // by canonical real_model so all M3 traffic shares one swatch.
   document.querySelector('.card--wide h2').textContent = data.tokenChart.title;
   const tokenLabels = data.tokenChart.labels;
   const tokenBuckets = data.tokenChart.buckets;
   const tokenBucketByLabel = new Map(tokenBuckets.map((bucket) => [bucket.label, bucket]));
-  const models = [...new Set(tokenBuckets.flatMap((b) => Object.keys(b.models ?? {}).map(canonicalModel)))].sort();
-  renderStackedBar('chart-tokens', tokenLabels, models, (label, model) => {
-    const bucket = tokenBucketByLabel.get(label);
-    return Object.entries(bucket?.models ?? {}).filter(([raw]) => canonicalModel(raw) === model)
-      .reduce((sum, [, tokens]) => sum + tokens, 0);
-  });
+  const seenStackLabels = new Map();   // stackKey → display label
+  const stackKeyInfo = new Map();      // stackKey → { alias, real } for coloring
+  for (const bucket of tokenBuckets) {
+    for (const stackKey of Object.keys(bucket.models ?? {})) {
+      if (seenStackLabels.has(stackKey)) continue;
+      const info = bucket.modelInfo?.[stackKey] ?? {};
+      const alias = canonicalModel(info.model ?? stackKey);
+      const real = info.real_model ? canonicalModel(info.real_model) : null;
+      const label = (real && real !== alias) ? `${alias} (→ ${real})` : alias;
+      seenStackLabels.set(stackKey, label);
+      stackKeyInfo.set(stackKey, { alias, real });
+    }
+  }
+  const stackKeys = [...seenStackLabels.keys()];
+  const sortedStackKeys = [...stackKeys].sort((a, b) => seenStackLabels.get(a).localeCompare(seenStackLabels.get(b)));
+  renderStackedBar('chart-tokens', tokenLabels, sortedStackKeys,
+    (label, stackKey) => Number(tokenBucketByLabel.get(label)?.models?.[stackKey] ?? 0),
+    (stackKey) => seenStackLabels.get(stackKey) ?? stackKey,
+    (stackKey) => {
+      // Color stacks by canonical real_model so all traffic to the same
+      // upstream model shares one swatch regardless of which alias the
+      // caller used. Use the map built above so stackKeys absent from
+      // the first bucket still get their canonical name.
+      const { real, alias } = stackKeyInfo.get(stackKey) ?? {};
+      return colorFor(real ?? alias);
+    }
+  );
 
   // Requests by hour-of-day: server returns per-bucket UTC counts; we
   // group them by *browser-local* hour-of-day so the chart reflects the
   // viewer's timezone rather than the server's.
   renderBars('chart-hours', data.requestHourChart.labels, data.requestHourChart.values);
 
-  // Cache hit rate (percent)
-  const cacheRows = [];
-  const seenCache = new Set();
+  // Cache hit rate — combine cache_read / context_tokens across all rows
+  // that share the same display label. You can't merge ratios by
+  // averaging (a row with 99/100 cache and a row with 0/1 don't average
+  // to 99/101), so we sum the counts and recompute the rate per label.
+  const cacheAcc = new Map();
   for (const r of data.cacheHitRateByModel ?? []) {
-    const cm = canonicalModel(r.model);
-    if (!seenCache.has(cm)) { seenCache.add(cm); cacheRows.push({ model: cm, hitRate: r.hitRate }); }
+    const alias = canonicalModel(r.model);
+    const real = r.real_model ? canonicalModel(r.real_model) : null;
+    const label = (real && real !== alias) ? `${alias} (→ ${real})` : alias;
+    const prev = cacheAcc.get(label) ?? { model: label, cache_read: 0, context_tokens: 0, _real: real };
+    prev.cache_read    += Number(r.cache_read ?? 0);
+    prev.context_tokens += Number(r.context_tokens ?? 0);
+    cacheAcc.set(label, prev);
   }
+  const cacheRows = [...cacheAcc.values()].map((r) => ({
+    model: r.model,
+    hitRate: r.context_tokens > 0 ? r.cache_read / r.context_tokens : 0,
+    _real: r._real,
+  }));
   renderBars('chart-cache', cacheRows.map((r) => r.model),
     cacheRows.map((r) => Math.round(r.hitRate * 100)),
-    cacheRows.map((r) => colorFor(r.model)));
+    cacheRows.map((r) => colorForRow(r)));
 
-  // Top models
-  const topModels = aggregateByCanonical(data.topModels ?? [],
+  // Top models — keep alias rows separate when the alias canonicalizes to
+  // a different name than real_model ("Haiku 4.5 (→ MiniMax-M3)" stays
+  // distinct from "MiniMax-M3" served via the bare `minimax` alias), but
+  // collapse them when canonical(alias) === canonical(real_model). The
+  // swatch colors by real_model so all M3 traffic reads as one color
+  // regardless of which alias the caller used.
+  const topModels = aggregateWithRealModel(data.topModels ?? [],
     ['requests', 'input_tokens', 'output_tokens', 'cache_read', 'cache_write', 'thinking', 'errors']);
+  // Summary line uses the dedicated totalsByRealModel query — its GROUP BY
+  // is on real_model alone (no LIMIT, no alias), so the totals reflect
+  // every upstream model that served in the window, not just the top-5.
+  const realModelTotals = (data.totalsByRealModel ?? []).map((r) => ({
+    model: r.real_model ? canonicalModel(r.real_model) : 'Direct',
+    requests: Number(r.requests ?? 0),
+  }));
+  const realModelSummary = realModelTotals.length > 0
+    ? `<tr class="real-model-summary"><td colspan="6"><strong>Total served per real model</strong>: ${
+        realModelTotals.map((r) => `${escapeHtml(r.model)} ${abbrev(r.requests)} reqs`).join(' · ')
+      }</td></tr>`
+    : '';
   document.querySelector('#table-models tbody').innerHTML = topModels.map((r) => `
     <tr>
-      <td><span class="session-swatch" style="background:${colorFor(r.model)}"></span>${r.model}</td>
+      <td><span class="session-swatch" style="background:${colorForRow(r)}"></span>${escapeHtml(r.model)}</td>
       <td>${abbrev(r.requests)}</td>
       <td>${abbrev(r.input_tokens + (r.cache_read ?? 0) + (r.cache_write ?? 0))}</td>
       <td>${abbrev(r.output_tokens)}</td>
       <td>${abbrev(r.thinking ?? 0)}</td>
       <td>${r.errors}</td>
     </tr>
-  `).join('');
+  `).join('') + realModelSummary;
 
   // The API keeps the raw effort string so provider-specific values such as
   // Claude's `xhigh` and Codex's `max` remain distinct in the breakdown.
@@ -227,7 +354,7 @@ async function refresh() {
     const rows = aggregateTokensByModelEffort(data.tokensByModelEffort);
     effortTable.innerHTML = rows.map((r) => `
     <tr>
-      <td><span class="session-swatch" style="background:${colorFor(r.model)}"></span>${escapeHtml(r.model)}</td>
+      <td><span class="session-swatch" style="background:${colorForRow(r)}"></span>${escapeHtml(r.model)}</td>
       <td>${escapeHtml(r.effort === 'unspecified' ? 'Unspecified' : r.effort)}</td>
       <td>${abbrev(r.requests)}</td>
       <td>${abbrev(r.tokens)}</td>
@@ -267,11 +394,11 @@ function renderBars(canvasId, labels, values, colors = '#4a86e8') {
   });
 }
 
-function renderStackedBar(canvasId, labels, series, valueFor) {
-  const datasets = series.map((name) => ({
-    label: name,
-    data: labels.map((d) => valueFor(d, name)),
-    backgroundColor: colorFor(name),
+function renderStackedBar(canvasId, labels, series, valueFor, labelFor = (s) => s, colorForSeries = colorFor) {
+  const datasets = series.map((key) => ({
+    label: labelFor(key),
+    data: labels.map((d) => valueFor(d, key)),
+    backgroundColor: colorForSeries(key),
     stack: 'tokens',
   }));
 
