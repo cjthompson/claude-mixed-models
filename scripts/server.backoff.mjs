@@ -28,8 +28,8 @@
 // counter to attempt 1 instead of inheriting a stale streak.
 //
 // `log(line, level)` defaults to the shared logger (lib/logger.js):
-// 'info' goes to stdout (stats/server.log); 'warn'/'error' go to
-// stderr (stats/server.err.log). Custom `log` functions may ignore `level`.
+// 'warn'/'error' go to stderr (stats/server.err.log).
+// Custom `log` functions may ignore `level`.
 
 import { logger } from '../lib/logger.js';
 
@@ -74,7 +74,7 @@ export function createBackoff(opts = {}) {
     if (healthy) s.attempt = 0;
 
     if (healthy && clean) {
-      log(`[stats] ${script} exited (code=${code} signal=${signal}, lived=${Math.round(lived / 1000)}s, healthy) — resetting retry counter`, 'info');
+      log(`[stats] ${script} exited (code=${code} signal=${signal}, lived=${Math.round(lived / 1000)}s, healthy) — resetting retry counter`, 'warn');
       return { action: 'noop' };
     }
 
