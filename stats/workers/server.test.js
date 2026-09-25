@@ -27,6 +27,13 @@ function seed(dbPath, withRow = true) {
 test('startServer: GET /api/stats returns JSON for a populated DB', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'server-test-'));
   const dbPath = join(dir, 'stats.db');
+  // The rollup seed bucket needs to fall inside the queried range so the
+  // assertions below see it. Floor "now" to the top of the hour — that's
+  // the bucket_start shape rollup_1h stores. Hardcoding a date drifts out
+  // of the 7d window as time passes; using now() keeps the test self-stable.
+  const recentBucket = new Date();
+  recentBucket.setUTCMinutes(0, 0, 0);
+  const recentBucketIso = recentBucket.toISOString();
   try {
     seed(dbPath);
     const seeded = new DatabaseSync(dbPath);
@@ -34,7 +41,7 @@ test('startServer: GET /api/stats returns JSON for a populated DB', async () => 
       (bucket_start, model, upstream, requests, errors, input_tokens, output_tokens,
        cache_read, cache_write, cache_5m, cache_1h, thinking)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      '2026-09-12T00:00:00.000Z', 'timestamp-model', 'test', 1, 0, 10, 2, 0, 0, 0, 0, 0);
+      recentBucketIso, 'timestamp-model', 'test', 1, 0, 10, 2, 0, 0, 0, 0, 0);
     seeded.close();
     const port = 18789 + Math.floor(Math.random() * 1000);
     const { url, close } = await startServer({ dbPath, port, publicDir });
@@ -46,7 +53,7 @@ test('startServer: GET /api/stats returns JSON for a populated DB', async () => 
       assert.ok(!('tokensByDay' in json));
       assert.ok(json.tokensByBucket.every((row) => row.bucket && row.model && Number.isFinite(row.tokens)));
       assert.deepEqual(json.tokensByBucket.find((row) => row.model === 'timestamp-model'), {
-        bucket: '2026-09-12T00:00:00.000Z', model: 'timestamp-model', tokens: 12,
+        bucket: recentBucketIso, model: 'timestamp-model', real_model: null, tokens: 12,
       });
       assert.ok('requestsByHourOfDay' in json);
       assert.ok('cacheHitRateByModel' in json);

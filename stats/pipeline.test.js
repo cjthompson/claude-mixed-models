@@ -287,8 +287,14 @@ test('stats pipeline: thinking tokens and 1h cache TTL survive the whole chain',
   const chart = tokensByBucket(db, 'all');
   assert.equal(chart.find((r) => r.model === 'gpt-5').tokens, 100 + 700 + 200 + 50);
   assert.equal(chart.find((r) => r.model === 'opus').tokens, 2 + 267014 + 1041);
-  const hitRates = Object.fromEntries(cacheHitRateByModel(db, 'all').map((r) => [r.model, r.hitRate]));
-  assert.equal(hitRates['gpt-5'], 700 / (100 + 700 + 200));
+  // cacheHitRateByModel now returns raw counts (cache_read, context_tokens)
+  // instead of a pre-computed rate. Derive the rate the same way the
+  // dashboard does, so a future shape change in either layer is caught.
+  const cacheRows = cacheHitRateByModel(db, 'all');
+  const gpt = cacheRows.find((r) => r.model === 'gpt-5');
+  assert.ok(gpt, 'gpt-5 should appear in cacheHitRateByModel');
+  const gptRate = gpt.context_tokens > 0 ? gpt.cache_read / gpt.context_tokens : 0;
+  assert.equal(gptRate, 700 / (100 + 700 + 200));
   const models = Object.fromEntries(topModels(db, 'all').map((r) => [r.model, r]));
   assert.equal(models['gpt-5'].thinking, 30);
   assert.equal(models['gpt-5'].cache_read, 700);
@@ -347,7 +353,8 @@ test('stats pipeline: Codex /openai ingress emits and rolls up Responses usage',
   assert.equal(lines.length, 1);
   const rec = JSON.parse(lines[0]);
   assert.equal(rec.model, 'gpt-5.6-terra');
-  assert.equal(rec.real_model, 'gpt-5.6-terra');
+  // OpenAI ingress is passthrough — no redirect, so real_model is null.
+  assert.equal(rec.real_model, null);
   assert.equal(rec.input_tokens, 100);
   assert.equal(rec.cache_read_input_tokens, 700);
   assert.equal(rec.cache_creation_input_tokens, 200);
@@ -380,5 +387,104 @@ test('stats pipeline: Codex /openai ingress emits and rolls up Responses usage',
     output_tokens: 50,
     thinking: 30,
   });
+  db.close();
+});
+
+// Verify the no-redirect contract: when the router forwards a request
+// without resolving it to a different upstream model (realModel === null),
+// the JSONL event carries real_model=null, the events table persists
+// null, and the rollup aggregates it as null. The dashboard uses null
+// to decide "show just the alias, no (→ real) arrow".
+test('stats pipeline: null real_model (no redirect) persists through batcher and rollup', async () => {
+  const conn = { url: upstream.url, key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(SAMPLE_SSE);
+  };
+
+  const jsonlPath = process.env.STATS_EVENTS_FILE;
+  const dbPath = join(workDir, 'no-redirect.db');
+
+  const { req, res } = makeReqRes();
+  forward(req, res, conn, Buffer.from('{"model":"haiku-original"}'), {
+    id: 'no-redirect-1',
+    t0: Date.now() - 5,
+    session: null,
+    model: 'haiku-original',
+    realModel: null,
+  });
+  await new Promise((resolve, reject) => {
+    res.on('finish', resolve);
+    res.on('error', reject);
+    setTimeout(() => reject(new Error('forward timed out after 5s')), 5000);
+  });
+
+  const lines = readFileSync(jsonlPath, 'utf8').trim().split('\n').filter(Boolean);
+  const rec = JSON.parse(lines[lines.length - 1]);
+  assert.equal(rec.id, 'no-redirect-1');
+  assert.equal(rec.model, 'haiku-original');
+  // The router passes null when no redirect happens; JSON.stringify
+  // emits `null` (not "null") so the round-trip back is also null.
+  assert.equal(rec.real_model, null);
+
+  const result = await runOnce({ jsonlPath, dbPath });
+  assert.equal(result.inserted, 1);
+
+  const db = new DatabaseSync(dbPath);
+  const event = db.prepare(`SELECT model, real_model FROM events WHERE id='no-redirect-1'`).get();
+  assert.equal(event.model, 'haiku-original');
+  assert.equal(event.real_model, null);
+  // Rollup stores '' as the sentinel for "no redirect" — the API layer
+  // maps that back to null in normalizeRealModel(). The raw column is ''
+  // because NULL in a composite PK lets ON CONFLICT slip past in SQLite.
+  const rollup = db.prepare(`SELECT model, real_model FROM rollup_5m WHERE model='haiku-original'`).get();
+  assert.ok(rollup, 'rollup_5m row should exist for haiku-original');
+  assert.equal(rollup.real_model, '');
+  db.close();
+});
+
+// Verify the redirect contract: when the router reports a non-null
+// realModel (alias → different upstream model), that value flows all
+// the way to the rollup and shows up in the API response. This is the
+// shape that powers the "Haiku 4.5 (→ MiniMax-M3)" dashboard label.
+test('stats pipeline: redirected real_model persists and is returned by topModels', async () => {
+  const conn = { url: upstream.url, key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(SAMPLE_SSE);
+  };
+
+  const jsonlPath = process.env.STATS_EVENTS_FILE;
+  const dbPath = join(workDir, 'redirect.db');
+
+  const { req, res } = makeReqRes();
+  forward(req, res, conn, Buffer.from('{"model":"claude-haiku-4-5"}'), {
+    id: 'redirect-1',
+    t0: Date.now() - 5,
+    session: null,
+    model: 'claude-haiku-4-5',
+    realModel: 'MiniMax-M3',
+  });
+  await new Promise((resolve, reject) => {
+    res.on('finish', resolve);
+    res.on('error', reject);
+    setTimeout(() => reject(new Error('forward timed out after 5s')), 5000);
+  });
+
+  await runOnce({ jsonlPath, dbPath });
+
+  const db = new DatabaseSync(dbPath);
+  const event = db.prepare(`SELECT model, real_model FROM events WHERE id='redirect-1'`).get();
+  assert.equal(event.model, 'claude-haiku-4-5');
+  assert.equal(event.real_model, 'MiniMax-M3');
+  const rollup = db.prepare(`SELECT model, real_model FROM rollup_5m WHERE model='claude-haiku-4-5'`).get();
+  assert.ok(rollup, 'rollup_5m row should exist');
+  assert.equal(rollup.real_model, 'MiniMax-M3');
+  // topModels must surface real_model so the dashboard can render the
+  // "Haiku 4.5 (→ MiniMax-M3)" arrow.
+  const topRows = topModels(db, 'all');
+  const row = topRows.find((r) => r.model === 'claude-haiku-4-5');
+  assert.ok(row, `expected claude-haiku-4-5 in topModels, got: ${JSON.stringify(topRows)}`);
+  assert.equal(row.real_model, 'MiniMax-M3');
   db.close();
 });

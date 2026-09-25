@@ -14,6 +14,7 @@ import {
   todaysTotals,
   thinkingByModel,
   rangeTotals,
+  totalsByRealModel,
 } from './queries.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -58,6 +59,8 @@ function addMixedProviderRows(db) {
 
 // Build rollups from the seeded events so the rollup-backed queries have data.
 // Mirrors what the batcher does, but inline so queries.test.js stays self-contained.
+// real_model is in the GROUP BY because the rollup PK includes it (a route
+// change mid-bucket would otherwise produce two rows that conflict).
 function buildRollups(db) {
   for (const [tbl, keyExpr] of [
     ['rollup_1d', "substr(ts,1,10)"],
@@ -65,8 +68,8 @@ function buildRollups(db) {
     ['rollup_5m', "substr(ts,1,13) || ':00:00.000Z'"],
   ]) {
     db.exec(`
-      INSERT INTO ${tbl} (bucket_start, model, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, cache_5m, cache_1h, thinking, p50_ms, p95_ms)
-      SELECT ${keyExpr} AS bucket_start, model, upstream,
+      INSERT INTO ${tbl} (bucket_start, model, real_model, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, cache_5m, cache_1h, thinking, p50_ms, p95_ms)
+      SELECT ${keyExpr} AS bucket_start, model, COALESCE(real_model, '') AS real_model, upstream,
              COUNT(*), SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END),
              SUM(input_tokens), SUM(output_tokens),
              SUM(cache_read_input_tokens), SUM(cache_creation_input_tokens),
@@ -74,7 +77,7 @@ function buildRollups(db) {
              SUM(thinking_tokens),
              NULL, NULL
       FROM events
-      GROUP BY bucket_start, model, upstream
+      GROUP BY bucket_start, model, COALESCE(real_model, ''), upstream
     `);
   }
 }
@@ -95,7 +98,7 @@ test('tokensByBucket: preserves exact UTC ISO bucket timestamps for all range', 
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     '2026-09-12T00:00:00.000Z', 'timestamp-model', 'test', 1, 0, 10, 2, 0, 0, 0, 0, 0);
   const row = tokensByBucket(db, 'all').find((r) => r.model === 'timestamp-model');
-  assert.deepEqual(row, { bucket: '2026-09-12T00:00:00.000Z', model: 'timestamp-model', tokens: 12 });
+  assert.deepEqual(row, { bucket: '2026-09-12T00:00:00.000Z', model: 'timestamp-model', real_model: null, tokens: 12 });
 });
 
 test('tokensByBucket: 24h range uses hourly buckets, not daily', () => {
@@ -145,15 +148,21 @@ test('requestsByHourOfDay: 30d and all read from rollup_1h, not rollup_1d', () =
   assert.ok(rows.every((r) => r.bucket.includes('T')));   // has a time component
 });
 
-test('cacheHitRateByModel: returns ratio of cache_read to total input', () => {
+test('cacheHitRateByModel: returns raw counts (cache_read + context_tokens) per (alias, real_model)', () => {
+  // The query returns per-(alias, real_model) raw counts so the frontend
+  // can combine across aliases that canonicalize to the same display
+  // name (averaging ratios loses information when the denominators
+  // differ). The hit rate is computed client-side from these counts.
   const db = freshDb();
   buildRollups(db);
   const rows = cacheHitRateByModel(db, 'all');
-  const byModel = Object.fromEntries(rows.map((r) => [r.model, r.hitRate]));
-  // minimax: 50 cache reads out of 100+200+300 input + 50 cache_read = 650 → 50/650
-  // claude-opus: 0 cache reads → 0
-  assert.ok(Math.abs(byModel['minimax'] - 50 / 650) < 1e-9);
-  assert.equal(byModel['claude-opus'], 0);
+  const byModel = Object.fromEntries(rows.map((r) => [r.model, r]));
+  // minimax: cache_read 50, context = 100+200+300+50 = 650
+  assert.equal(byModel['minimax'].cache_read, 50);
+  assert.equal(byModel['minimax'].context_tokens, 650);
+  assert.equal(byModel['minimax'].input_tokens, 600);
+  // claude-opus: 0 cache reads
+  assert.equal(byModel['claude-opus'].cache_read, 0);
 });
 
 test('mixed providers: chart, sessions, hit rates, model components, and range totals use all token categories', () => {
@@ -168,9 +177,13 @@ test('mixed providers: chart, sessions, hit rates, model components, and range t
   const session = topSessions(db, 'all').find((r) => r.session_id === 's3');
   assert.equal(session.tokens, (100 + 700 + 200 + 50) + (400 + 300 + 100 + 40));
 
-  const hitRates = Object.fromEntries(cacheHitRateByModel(db, 'all').map((r) => [r.model, r.hitRate]));
-  assert.equal(hitRates['gpt-5'], 700 / (100 + 700 + 200));
-  assert.equal(hitRates['claude-sonnet'], 300 / (400 + 300 + 100));
+  // cacheHitRateByModel returns raw counts now — the rate is derived
+  // client-side. Assert the counts directly.
+  const cacheCounts = Object.fromEntries(cacheHitRateByModel(db, 'all').map((r) => [r.model, r]));
+  assert.equal(cacheCounts['gpt-5'].cache_read, 700);
+  assert.equal(cacheCounts['gpt-5'].context_tokens, 100 + 700 + 200);
+  assert.equal(cacheCounts['claude-sonnet'].cache_read, 300);
+  assert.equal(cacheCounts['claude-sonnet'].context_tokens, 400 + 300 + 100);
 
   const models = Object.fromEntries(topModels(db, 'all').map((r) => [r.model, r]));
   assert.equal(models['gpt-5'].input_tokens, 100);
@@ -279,4 +292,80 @@ test('rangeTotals: sums requests and tokens over the selected range', () => {
   const h24 = rangeTotals(db, '24h');
   assert.equal(h24.requests, 0);
   assert.equal(typeof h24.input_tokens, 'number');
+});
+
+// `real_model` carries the resolved upstream model distinct from the
+// alias the caller asked for. NULL in the API output means "no
+// redirect" — the alias was served by its own real model. All rollup-
+// backed queries must surface this column so the dashboard can render
+// "alias (→ real_model)" rows alongside plain aliases.
+test('topModels: returns real_model for each row (null when no redirect)', () => {
+  const db = freshDb();
+  buildRollups(db);
+  const rows = topModels(db, 'all');
+  const minimax = rows.find((r) => r.model === 'minimax');
+  assert.ok(minimax, 'minimax row should exist');
+  // Seeded events for 'minimax' had real_model='MiniMax-M3', so the
+  // rollup's real_model column is 'MiniMax-M3' (mapped to null when the
+  // query returns it through normalizeRealModel).
+  assert.equal(minimax.real_model, 'MiniMax-M3');
+});
+
+test('cacheHitRateByModel: returns real_model alongside the count fields', () => {
+  const db = freshDb();
+  buildRollups(db);
+  const rows = cacheHitRateByModel(db, 'all');
+  const minimax = rows.find((r) => r.model === 'minimax');
+  assert.ok(minimax);
+  assert.equal(minimax.real_model, 'MiniMax-M3');
+  assert.equal(typeof minimax.cache_read, 'number');
+  assert.equal(typeof minimax.context_tokens, 'number');
+});
+
+test('thinkingByModel: returns real_model so the dashboard can show the redirect', () => {
+  const db = freshDb();
+  buildRollups(db);
+  const rows = thinkingByModel(db, 'all');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].model, 'claude-opus');
+  assert.equal(rows[0].real_model, 'claude-opus');
+});
+
+test('totalsByRealModel: aggregates across all aliases, no LIMIT', () => {
+  const db = freshDb();
+  buildRollups(db);
+  const totals = totalsByRealModel(db, 'all');
+  // Seeded: 4 minimax events (MiniMax-M3) + 1 claude-opus (claude-opus) + 1 claude-opus 502
+  // Wait — let's recount from the freshDb fixture.
+  // a1, a2, b1 → minimax/MiniMax-M3 (3 events, 1 with cache_read)
+  // a3, b2 → claude-opus/claude-opus (2 events)
+  const m3 = totals.find((r) => r.real_model === 'MiniMax-M3');
+  assert.ok(m3, 'MiniMax-M3 row should exist');
+  assert.equal(m3.requests, 3);
+  const opus = totals.find((r) => r.real_model === 'claude-opus');
+  assert.ok(opus);
+  assert.equal(opus.requests, 2);
+});
+
+test('tokensByBucket: groups by (bucket, model, real_model) so redirected aliases stay distinct', () => {
+  // Same bucket, same alias, two different real_models — possible when a
+  // routes.config.json redirect changes mid-bucket. The query must split
+  // these into separate rows rather than silently summing under one.
+  const db = freshDb();
+  const insert = db.prepare(`
+    INSERT INTO rollup_1h (bucket_start, model, real_model, upstream, requests, errors,
+                          input_tokens, output_tokens, cache_read, cache_write,
+                          cache_5m, cache_1h, thinking)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insert.run('2026-06-07T10:00:00.000Z', 'haiku', 'MiniMax-M3',  'api.minimax.io',    10, 0, 100, 50, 0, 0, 0, 0, 0);
+  insert.run('2026-06-07T10:00:00.000Z', 'haiku', 'claude-haiku-4-5', 'api.anthropic.com', 5, 0, 50, 25, 0, 0, 0, 0, 0);
+  const rows = tokensByBucket(db, 'all');
+  const bucket = rows.filter((r) => r.bucket === '2026-06-07T10:00:00.000Z' && r.model === 'haiku');
+  assert.equal(bucket.length, 2, `expected 2 rows for haiku in this bucket, got ${JSON.stringify(bucket)}`);
+  const m3 = bucket.find((r) => r.real_model === 'MiniMax-M3');
+  const real = bucket.find((r) => r.real_model === 'claude-haiku-4-5');
+  assert.ok(m3 && real);
+  assert.equal(m3.tokens, 150);
+  assert.equal(real.tokens, 75);
 });

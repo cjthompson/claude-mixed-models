@@ -2,12 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'node:fs';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // We import the batcher's runOnce() so we can drive a single pass without spawning a process.
 import { runOnce, installShutdown } from './batcher.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const SCHEMA_PATH = join(here, '..', 'schema.sql');
 
 // Clears LOG_LEVEL/DEBUG for the duration of a test and returns a restore fn
 // that puts back the prior values (delete only if originally unset).
@@ -204,6 +208,128 @@ test('runOnce: applyMigrations adds new columns to a pre-existing DB and is idem
     // Third pass: rerun on the now-migrated DB. applyMigrations must be
     // a no-op (no error from "duplicate column name").
     await runOnce({ jsonlPath, dbPath });
+  } finally {
+    cleanup();
+  }
+});
+
+// The CREATE TABLE AS SELECT above happens to inherit an implicit
+// nullable column from the source SELECT, which means it doesn't
+// exercise the DROP NOT NULL branch. Build a fresh DB whose events
+// table has real_model NOT NULL (matching the pre-real_model-aware
+// schema) and verify applyMigrations drops the constraint so events
+// with null real_model — the no-redirect case the router now emits —
+// can be inserted.
+test('runOnce: applyMigrations drops NOT NULL on events.real_model so no-redirect events can be inserted', async () => {
+  const { jsonlPath, dbPath, cleanup } = freshPaths();
+  try {
+    // Build a DB by hand whose events.real_model is NOT NULL — the
+    // shape a user would have had before the real_model-aware router
+    // was deployed. INSERT a row that satisfies the existing NOT NULL
+    // so we have a real (older-schema) DB on disk to migrate from.
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(readFileSync(SCHEMA_PATH, 'utf8'));
+    // Recreate events with real_model TEXT NOT NULL (the pre-fix schema).
+    seed.exec(`
+      CREATE TABLE events_v0 AS SELECT id, ts, model, real_model, upstream, status, duration_ms, session_id,
+                                       input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                                       cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens, effort
+                                FROM events WHERE 0;
+      DROP TABLE events;
+      ALTER TABLE events_v0 RENAME TO events;
+    `);
+    // Real_model is now NOT NULL on events; recreate rollups with the
+    // old PK (no real_model) so dropStaleRollups has work to do too.
+    for (const grain of ['5m', '1h', '1d']) {
+      seed.exec(`DROP TABLE rollup_${grain}`);
+    }
+    seed.close();
+
+    // Write a JSONL event whose real_model is null — the new contract
+    // for no-redirect traffic. The pre-fix schema would reject this
+    // with "NOT NULL constraint failed"; applyMigrations must have
+    // dropped the constraint before INSERT runs.
+    fs.writeFileSync(jsonlPath, JSON.stringify({
+      id: 'no-redirect-v0', ts: '2026-06-08T10:00:00.000Z',
+      model: 'claude-haiku-4-5', real_model: null,
+      upstream: 'api.minimax.io', status: 200, durationMs: 5,
+      input_tokens: 10, output_tokens: 42,
+      cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+      cache_5m_input_tokens: 0, cache_1h_input_tokens: 0, thinking_tokens: 0,
+    }) + '\n');
+
+    const result = await runOnce({ jsonlPath, dbPath });
+    assert.equal(result.inserted, 1, 'runOnce must accept null real_model on events');
+
+    const db = new DatabaseSync(dbPath);
+    const event = db.prepare(`SELECT real_model FROM events WHERE id='no-redirect-v0'`).get();
+    assert.equal(event.real_model, null, 'events.real_model must remain null after insert');
+    const cols = db.prepare(`PRAGMA table_info(events)`).all();
+    const realModelCol = cols.find((c) => c.name === 'real_model');
+    assert.equal(realModelCol.notnull, 0, 'events.real_model NOT NULL must have been dropped');
+
+    // Backfill: every event whose real_model equaled model under the old
+    // contract (real_model = model for passthrough) is rewritten to NULL.
+    db.prepare(`INSERT INTO events (id, ts, model, real_model, upstream, status, duration_ms, session_id,
+                                     input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                                     cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens)
+                VALUES ('old-passthrough', '2026-06-08T11:00:00.000Z', 'claude-opus-4-8', 'claude-opus-4-8',
+                        'api.anthropic.com', 200, 5, null, 0, 0, 0, 0, 0, 0, 0)`).run();
+    fs.writeFileSync(jsonlPath, '');
+    await runOnce({ jsonlPath, dbPath });
+    const rewritten = db.prepare(`SELECT real_model FROM events WHERE id='old-passthrough'`).get();
+    assert.equal(rewritten.real_model, null, 'old-style passthrough events must be rewritten to NULL by the backfill');
+    db.close();
+  } finally {
+    cleanup();
+  }
+});
+
+// When a user upgrades from a pre-real_model PK on the rollup tables,
+// applyMigrations must drop and recreate them with the new PK (which
+// now includes real_model) so events split across real_models get
+// separate rollup rows. The OLD data on those tables is rebuilt from
+// events by fullRefreshGrain on the next startup — we don't need to
+// preserve rollup rows across this migration.
+test('runOnce: applyMigrations drops pre-real_model rollup tables so the new PK (with real_model) can take over', async () => {
+  const { jsonlPath, dbPath, cleanup } = freshPaths();
+  try {
+    // First pass: write one event so the rollup tables are created
+    // with the current schema (PK includes real_model).
+    fs.writeFileSync(jsonlPath, JSON.stringify({
+      id: 'a', ts: '2026-06-08T10:00:00.000Z',
+      model: 'claude-haiku-4-5', real_model: 'MiniMax-M3',
+      upstream: 'api.minimax.io', status: 200, durationMs: 1,
+      input_tokens: 0, output_tokens: 0,
+      cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+      cache_5m_input_tokens: 0, cache_1h_input_tokens: 0, thinking_tokens: 0,
+    }) + '\n');
+    await runOnce({ jsonlPath, dbPath });
+
+    // Recreate rollup_5m with the OLD PK (no real_model) to simulate an
+    // upgrade from the pre-real_model schema. applyMigrations should
+    // detect the missing real_model in the PK and drop the table.
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE rollup_5m_old AS SELECT bucket_start, model, real_model, upstream, requests, errors,
+                                       input_tokens, output_tokens, cache_read, cache_write,
+                                       cache_5m, cache_1h, thinking, p50_ms, p95_ms
+                                FROM rollup_5m;
+      DROP TABLE rollup_5m;
+      ALTER TABLE rollup_5m_old RENAME TO rollup_5m;
+    `);
+    db.close();
+
+    // Second pass — applyMigrations should drop rollup_5m because its
+    // PK doesn't include real_model, then schema CREATE recreates it
+    // with the new PK.
+    fs.writeFileSync(jsonlPath, '');
+    await runOnce({ jsonlPath, dbPath });
+
+    const db2 = new DatabaseSync(dbPath);
+    const pk = db2.prepare(`SELECT name FROM pragma_table_info('rollup_5m') WHERE pk > 0 ORDER BY pk`).all().map((r) => r.name);
+    assert.ok(pk.includes('real_model'), `rollup_5m PK should include real_model after migration, got: ${JSON.stringify(pk)}`);
+    db2.close();
   } finally {
     cleanup();
   }

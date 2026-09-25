@@ -35,6 +35,19 @@ function bucketEnd(bucketIso, grain) {
 // SQLite has no `ADD COLUMN IF NOT EXISTS`, so we check PRAGMA table_info
 // first. Each entry: { table, column, type }. The function is a no-op
 // for any column that's already present.
+//
+// Entries with `kind: 'drop_not_null'` relax an existing NOT NULL
+// constraint. SQLite supports `ALTER TABLE … ALTER COLUMN … DROP NOT NULL`
+// as of 3.35.0; node:sqlite bundles a SQLite that has it. They're
+// separate from column-add entries because the idempotency check is
+// different (PRAGMA table_info reports `notnull` rather than presence).
+//
+// Entries with `kind: 'backfill_events_real_model_null'` rewrite old
+// events whose real_model was captured equal to model (= no redirect,
+// per the pre-null contract) to NULL — the new contract treats them the
+// same as fresh no-redirect events. Without this, GROUP BY model,
+// real_model splits each historical model into two groups until the old
+// events age out of every query window.
 const MIGRATIONS = [
   { table: 'events',   column: 'effort',               type: 'TEXT' },
   // 2026-06-13: cache TTL split + thinking tokens
@@ -50,19 +63,78 @@ const MIGRATIONS = [
   { table: 'rollup_1d', column: 'cache_5m',             type: 'INTEGER NOT NULL DEFAULT 0' },
   { table: 'rollup_1d', column: 'cache_1h',             type: 'INTEGER NOT NULL DEFAULT 0' },
   { table: 'rollup_1d', column: 'thinking',             type: 'INTEGER NOT NULL DEFAULT 0' },
+  // 2026-09-25: real_model — NULL on events means "no redirect", and ''
+  // (sentinel) on rollups means the same thing. rollup real_model is
+  // part of the PK so a route change mid-bucket creates two rollup rows
+  // instead of clobbering one. The rollup tables are dropped and
+  // recreated in applyMigrations() when the PK doesn't yet include
+  // real_model — old rollup data is rebuilt from events by fullRefreshGrain.
+  { kind: 'drop_not_null', table: 'events',    column: 'real_model' },
+  { table: 'rollup_5m', column: 'real_model', type: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'rollup_1h', column: 'real_model', type: "TEXT NOT NULL DEFAULT ''" },
+  { table: 'rollup_1d', column: 'real_model', type: "TEXT NOT NULL DEFAULT ''" },
+  { kind: 'backfill_events_real_model_null' },
 ];
+
+// Rollup tables whose PRIMARY KEY doesn't yet include `real_model` are
+// from a pre-real_model schema and must be rebuilt. SQLite can't ALTER a
+// PK in place, so we drop the table — schema CREATE below re-creates it
+// with the new PK, and fullRefreshGrain on the next startup repopulates
+// it from events. A table with no PK at all (the legacy CREATE TABLE
+// AS SELECT shape from a manual downgrade) is also dropped, since the
+// new PK can't be added in place.
+function dropStaleRollups(db) {
+  for (const grain of ['5m', '1h', '1d']) {
+    const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(`rollup_${grain}`);
+    if (!exists) continue;
+    const pkCols = db.prepare(`SELECT name FROM pragma_table_info('rollup_${grain}') WHERE pk > 0 ORDER BY pk`).all().map((r) => r.name);
+    if (!pkCols.includes('real_model')) {
+      db.exec(`DROP TABLE rollup_${grain}`);
+    }
+  }
+}
+
 function applyMigrations(db) {
   // Group by table so each PRAGMA table_info fires once, not once per column.
   const byTable = new Map();
   for (const m of MIGRATIONS) {
+    if (m.kind === 'drop_not_null' || m.kind === 'backfill_events_real_model_null') {
+      // Handled below — different idempotency check than column-add.
+      continue;
+    }
     if (!byTable.has(m.table)) byTable.set(m.table, []);
     byTable.get(m.table).push(m);
   }
   for (const [table, cols] of byTable) {
+    // Skip tables that don't exist yet — the schema CREATE run by
+    // openAndMigrateDb() handles them on a fresh DB. ALTER TABLE
+    // ADD COLUMN requires the table to exist.
+    const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(table);
+    if (!exists) continue;
     const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
     for (const { column, type } of cols) {
       if (!existing.has(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
+  }
+  // Relax NOT NULL on existing columns. Idempotent: skip when the column
+  // is already nullable (the default for fresh installs).
+  for (const m of MIGRATIONS) {
+    if (m.kind !== 'drop_not_null') continue;
+    const exists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(m.table);
+    if (!exists) continue;
+    const col = db.prepare(`PRAGMA table_info(${m.table})`).all().find((c) => c.name === m.column);
+    if (col && col.notnull === 1) {
+      db.exec(`ALTER TABLE ${m.table} ALTER COLUMN ${m.column} DROP NOT NULL`);
+    }
+  }
+  // One-time data backfill: events recorded before the NULL-means-no-redirect
+  // contract have real_model = model for passthrough traffic. Rewrite those
+  // to NULL so a fresh install and an upgraded install produce identical
+  // GROUP BY model, real_model results. Idempotent: only runs if there are
+  // rows to fix (a fresh DB has nothing to update).
+  const eventsTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='events'`).get();
+  if (eventsTable) {
+    db.exec(`UPDATE events SET real_model = NULL WHERE real_model = model AND real_model IS NOT NULL`);
   }
 }
 
@@ -70,9 +142,17 @@ function applyMigrations(db) {
 // migrations. Returns the open DatabaseSync so the caller can prepare
 // statements. Called even when the JSONL is empty/absent, so the DB is
 // always up-to-date before we either insert events or exit early.
+//
+// Order matters: dropStaleRollups() drops any rollup tables whose PK
+// is missing `real_model` BEFORE the schema CREATE runs, so the
+// schema CREATE can install the new PK on a fresh table rather than
+// no-op'ing on the legacy shape. applyMigrations() then handles the
+// additive migrations (column-adds, NOT NULL drops, backfill) on the
+// post-schema tables.
 function openAndMigrateDb(dbPath, schemaPath) {
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
+  dropStaleRollups(db);
   db.exec(readFileSync(schemaPath, 'utf8'));
   applyMigrations(db);
   return db;
@@ -86,15 +166,24 @@ function percentiles(arr) {
   return { p50: p(0.5), p95: p(0.95) };
 }
 
-// Recompute one rollup row from the events table.
-function recomputeRollup(db, grain, bucketStartIso, model, upstream) {
+// Recompute one rollup row from the events table for the given
+// (bucket, model, real_model, upstream) tuple. real_model is part of the
+// rollup PK, so events with different real_models within the same
+// (bucket, model, upstream) form separate rollup rows — events that
+// spanned a route change end up split correctly instead of being
+// clobbered. realModel is a string ('' = no redirect) so the rollup
+// column never sees a NULL value, which would let duplicate rows slip
+// past ON CONFLICT (SQLite treats each NULL in a composite PK as
+// distinct).
+function recomputeRollup(db, grain, bucketStartIso, model, realModel, upstream) {
   const bucketEndIso = bucketEnd(bucketStartIso, grain);
   const rows = db.prepare(`
     SELECT duration_ms, status, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
            cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens
     FROM events
     WHERE ts >= ? AND ts < ? AND model = ? AND upstream = ?
-  `).all(bucketStartIso, bucketEndIso, model, upstream);
+      AND COALESCE(real_model, '') = ?
+  `).all(bucketStartIso, bucketEndIso, model, upstream, realModel);
   const requests = rows.length;
   const errors = rows.filter((r) => r.status >= 400).length;
   const input_tokens  = rows.reduce((s, r) => s + r.input_tokens, 0);
@@ -106,9 +195,9 @@ function recomputeRollup(db, grain, bucketStartIso, model, upstream) {
   const thinking      = rows.reduce((s, r) => s + r.thinking_tokens, 0);
   const { p50, p95 } = percentiles(rows.map((r) => r.duration_ms));
   db.prepare(`
-    INSERT INTO rollup_${grain} (bucket_start, model, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, cache_5m, cache_1h, thinking, p50_ms, p95_ms)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (bucket_start, model, upstream) DO UPDATE SET
+    INSERT INTO rollup_${grain} (bucket_start, model, real_model, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, cache_5m, cache_1h, thinking, p50_ms, p95_ms)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (bucket_start, model, real_model, upstream) DO UPDATE SET
       requests = excluded.requests,
       errors = excluded.errors,
       input_tokens = excluded.input_tokens,
@@ -120,7 +209,7 @@ function recomputeRollup(db, grain, bucketStartIso, model, upstream) {
       thinking = excluded.thinking,
       p50_ms = excluded.p50_ms,
       p95_ms = excluded.p95_ms
-  `).run(bucketStartIso, model, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, cache_5m, cache_1h, thinking, p50, p95);
+  `).run(bucketStartIso, model, realModel, upstream, requests, errors, input_tokens, output_tokens, cache_read, cache_write, cache_5m, cache_1h, thinking, p50, p95);
 }
 
 // One pass: read all lines, insert events, recompute touched rollup buckets, truncate.
@@ -157,7 +246,7 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const touched = new Set();   // `${grain}|${bucketStart}|${model}|${upstream}`
+  const touched = new Set();   // `${grain}|${bucketStart}|${model}|${realModel}|${upstream}`
   let inserted = 0;
   db.exec('BEGIN');
   try {
@@ -165,9 +254,12 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
       let rec;
       try { rec = JSON.parse(line); } catch { continue; }
       // The router writes 'cache_read_input_tokens' / 'cache_creation_input_tokens' / 'sessionId';
-      // normalize to the column names used in the schema.
+      // normalize to the column names used in the schema. `rec.real_model`
+      // is null when no redirect happened; node:sqlite rejects `undefined`
+      // for bound parameters, so coerce a missing key to null too.
+      const realModel = rec.real_model === undefined ? null : (rec.real_model ?? null);
       const result = insertEvent.run(
-        rec.id, rec.ts, rec.model, rec.real_model, rec.effort ?? null, rec.upstream, rec.status, rec.durationMs,
+        rec.id, rec.ts, rec.model, realModel, rec.effort ?? null, rec.upstream, rec.status, rec.durationMs,
         rec.sessionId ?? null,
         rec.input_tokens ?? 0, rec.output_tokens ?? 0,
         rec.cache_read_input_tokens ?? 0, rec.cache_creation_input_tokens ?? 0,
@@ -175,14 +267,20 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
       );
       if (result.changes > 0) {
         inserted++;
+        // Sentinel '' represents null real_model in the rollup PK; events
+        // with no redirect (realModel === null) and events whose real_model
+        // was lost during a parser hiccup both land in the same rollup
+        // bucket, which is fine because their counts both belong to
+        // "alias served by its own model".
+        const rollupRealModel = realModel ?? '';
         for (const grain of ['5m', '1h', '1d']) {
-          touched.add(`${grain}|${bucketStart(rec.ts, grain)}|${rec.model}|${rec.upstream}`);
+          touched.add(`${grain}|${bucketStart(rec.ts, grain)}|${rec.model}|${rollupRealModel}|${rec.upstream}`);
         }
       }
     }
     for (const key of touched) {
-      const [grain, bs, model, upstream] = key.split('|');
-      recomputeRollup(db, grain, bs, model, upstream);
+      const [grain, bs, model, rollupRealModel, upstream] = key.split('|');
+      recomputeRollup(db, grain, bs, model, rollupRealModel, upstream);
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -202,16 +300,19 @@ const FULL_REFRESH_MS = { '5m': 5 * 60_000, '1h': 60 * 60_000, '1d': 24 * 60 * 6
 
 // Full recompute of all rollup buckets for one grain, then update last_refresh.
 function fullRefreshGrain(db, grain) {
-  const events = db.prepare('SELECT DISTINCT ts, model, upstream FROM events').all();
+  const events = db.prepare('SELECT DISTINCT ts, model, real_model, upstream FROM events').all();
   const seen = new Set();
   db.exec('BEGIN');
   try {
-    for (const { ts, model, upstream } of events) {
+    for (const { ts, model, real_model, upstream } of events) {
       const bs = bucketStart(ts, grain);
-      const key = `${bs}|${model}|${upstream}`;
+      // '' sentinel so the rollup key never contains NULL — SQLite would
+      // treat each NULL in the composite PK as distinct and skip ON CONFLICT.
+      const rollupRealModel = real_model ?? '';
+      const key = `${bs}|${model}|${rollupRealModel}|${upstream}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      recomputeRollup(db, grain, bs, model, upstream);
+      recomputeRollup(db, grain, bs, model, rollupRealModel, upstream);
     }
     db.prepare('INSERT OR REPLACE INTO rollup_refresh (grain, last_refresh) VALUES (?, ?)').run(grain, new Date().toISOString());
     db.exec('COMMIT');

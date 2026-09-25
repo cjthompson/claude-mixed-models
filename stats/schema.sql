@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS events (
   id                          TEXT NOT NULL,
   ts                          TEXT NOT NULL,
   model                       TEXT NOT NULL,   -- client-requested alias
-  real_model                  TEXT NOT NULL,   -- resolved upstream model
+  real_model                  TEXT,            -- resolved upstream model; NULL when no redirect (alias served by its own real model)
   effort                      TEXT,            -- request effort setting; NULL when absent
   upstream                    TEXT NOT NULL,
   status                      INTEGER NOT NULL,
@@ -42,9 +42,22 @@ CREATE INDEX IF NOT EXISTS idx_events_session  ON events(session_id);
 -- 5-minute rollup. The card queries primarily read from this.
 -- Recomputed from `events` on every batcher pass (never incremented),
 -- so a retried pass produces identical values.
+-- real_model captures which upstream model actually served the request —
+-- distinct from `model` (the alias the caller asked for), since routes
+-- can redirect an alias to a different real model (e.g. `claude-haiku-4-5`
+-- → `MiniMax-M3`). NULL means no redirect happened (the alias was served
+-- by its own real model).
 CREATE TABLE IF NOT EXISTS rollup_5m (
   bucket_start  TEXT NOT NULL,   -- ISO 8601, top of 5-min window (UTC)
   model         TEXT NOT NULL,
+  -- real_model is part of the PK so a route change inside a bucket
+  -- produces two rollup rows instead of overwriting one. '' (empty
+  -- string) is the sentinel for "no redirect" — events.real_model is
+  -- NULL in that case, and the batcher's INSERT coerces it via
+  -- COALESCE(NULL, ''). Using '' instead of NULL avoids the SQLite
+  -- quirk where NULLs in a composite PK let ON CONFLICT slip past
+  -- and produce duplicate rows.
+  real_model    TEXT NOT NULL DEFAULT '',
   upstream      TEXT NOT NULL,
   requests      INTEGER NOT NULL DEFAULT 0,
   errors        INTEGER NOT NULL DEFAULT 0,
@@ -57,7 +70,7 @@ CREATE TABLE IF NOT EXISTS rollup_5m (
   thinking      INTEGER NOT NULL DEFAULT 0,
   p50_ms        INTEGER,
   p95_ms        INTEGER,
-  PRIMARY KEY (bucket_start, model, upstream)
+  PRIMARY KEY (bucket_start, model, real_model, upstream)
 );
 CREATE INDEX IF NOT EXISTS idx_5m_bucket ON rollup_5m(bucket_start);
 
@@ -65,6 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_5m_bucket ON rollup_5m(bucket_start);
 CREATE TABLE IF NOT EXISTS rollup_1h (
   bucket_start  TEXT NOT NULL,
   model         TEXT NOT NULL,
+  real_model    TEXT NOT NULL DEFAULT '',
   upstream      TEXT NOT NULL,
   requests      INTEGER NOT NULL DEFAULT 0,
   errors        INTEGER NOT NULL DEFAULT 0,
@@ -77,7 +91,7 @@ CREATE TABLE IF NOT EXISTS rollup_1h (
   thinking      INTEGER NOT NULL DEFAULT 0,
   p50_ms        INTEGER,
   p95_ms        INTEGER,
-  PRIMARY KEY (bucket_start, model, upstream)
+  PRIMARY KEY (bucket_start, model, real_model, upstream)
 );
 CREATE INDEX IF NOT EXISTS idx_1h_bucket ON rollup_1h(bucket_start);
 
@@ -85,6 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_1h_bucket ON rollup_1h(bucket_start);
 CREATE TABLE IF NOT EXISTS rollup_1d (
   bucket_start  TEXT NOT NULL,   -- 'YYYY-MM-DD' (UTC)
   model         TEXT NOT NULL,
+  real_model    TEXT NOT NULL DEFAULT '',
   upstream      TEXT NOT NULL,
   requests      INTEGER NOT NULL DEFAULT 0,
   errors        INTEGER NOT NULL DEFAULT 0,
@@ -97,7 +112,7 @@ CREATE TABLE IF NOT EXISTS rollup_1d (
   thinking      INTEGER NOT NULL DEFAULT 0,
   p50_ms        INTEGER,
   p95_ms        INTEGER,
-  PRIMARY KEY (bucket_start, model, upstream)
+  PRIMARY KEY (bucket_start, model, real_model, upstream)
 );
 CREATE INDEX IF NOT EXISTS idx_1d_bucket ON rollup_1d(bucket_start);
 

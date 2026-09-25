@@ -14,6 +14,7 @@ import {
   errorsByStatus,
   rangeTotals,
   thinkingByModel,
+  totalsByRealModel,
 } from '../queries.mjs';
 import { logger } from '../../lib/logger.js';
 
@@ -61,6 +62,7 @@ function buildApiHandler(dbPath) {
         topSessions:          query(dbPath, range, topSessions),
         errorsByStatus:       query(dbPath, range, errorsByStatus),
         thinkingByModel:      query(dbPath, range, thinkingByModel),
+        totalsByRealModel:    query(dbPath, range, totalsByRealModel),
         rangeTotals:          query(dbPath, range, rangeTotals),
       };
       const json = JSON.stringify(payload);

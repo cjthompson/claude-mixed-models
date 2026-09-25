@@ -28,20 +28,32 @@
         const rows = [...(payload.tokensByBucket ?? [])].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
         const byBucket = new Map();
         for (const r of rows) {
-          const bucket = byBucket.get(r.bucket) ?? { bucket: r.bucket, models: {} };
-          if (r.model != null) bucket.models[r.model] = (bucket.models[r.model] ?? 0) + Number(r.tokens ?? 0);
+          const bucket = byBucket.get(r.bucket) ?? { bucket: r.bucket, models: {}, modelInfo: {} };
+          // Key stacks by the (alias, real_model) tuple so a redirected
+          // alias doesn't collapse into the same stack as a direct call
+          // to the same upstream model (e.g. haiku → M3 vs minimax → M3).
+          // The frontend reads modelInfo[stackKey] to recover the raw
+          // names so it can compute the display label and color.
+          const stackKey = r.real_model ? `${r.model}|${r.real_model}` : (r.model ?? '');
+          if (r.model != null) {
+            bucket.models[stackKey] = (bucket.models[stackKey] ?? 0) + Number(r.tokens ?? 0);
+            bucket.modelInfo[stackKey] = { model: r.model, real_model: r.real_model ?? null };
+          }
           byBucket.set(r.bucket, bucket);
         }
         if (hourly) {
           const end = new Date(now); end.setUTCMinutes(0, 0, 0);
-          for (let i = 23; i >= 0; i--) { const d = new Date(end); d.setUTCHours(d.getUTCHours() - i); const bucket = d.toISOString(); if (!byBucket.has(bucket)) byBucket.set(bucket, { bucket, models: {} }); }
+          for (let i = 23; i >= 0; i--) { const d = new Date(end); d.setUTCHours(d.getUTCHours() - i); const bucket = d.toISOString(); if (!byBucket.has(bucket)) byBucket.set(bucket, { bucket, models: {}, modelInfo: {} }); }
         }
         const grouped = new Map();
         for (const r of [...byBucket.values()].sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)))) {
           const label = dayLabels ? clock.localDay(r.bucket) : clock.localTime(r.bucket);
           let item = grouped.get(label);
-          if (!item) { item = { label, models: {} }; grouped.set(label, item); }
-          for (const [model, tokens] of Object.entries(r.models ?? {})) item.models[model] = (item.models[model] ?? 0) + tokens;
+          if (!item) { item = { label, models: {}, modelInfo: {} }; grouped.set(label, item); }
+          for (const [stackKey, tokens] of Object.entries(r.models ?? {})) {
+            item.models[stackKey] = (item.models[stackKey] ?? 0) + tokens;
+            if (r.modelInfo?.[stackKey]) item.modelInfo[stackKey] = r.modelInfo[stackKey];
+          }
         }
         const tokenChart = {
           title: short ? 'Tokens per 5m' : hourly ? 'Tokens per hour' : 'Tokens per day',

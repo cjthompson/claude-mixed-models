@@ -389,7 +389,9 @@ export function handleRequest(req, res) {
         } catch (err) {
           return fail(res, 500, `router: ${err.message}`);
         }
-        realModel = originalModel;
+        // OpenAI ingress is passthrough — the caller's model name IS the
+        // upstream model name. No redirect happened; real_model is null.
+        realModel = null;
         outBody = raw;
       } else {
         route = resolveRoute(body.model, config.routes);
@@ -400,7 +402,11 @@ export function handleRequest(req, res) {
         } catch (err) {
           return fail(res, 500, `router: ${err.message}`);
         }
-        realModel = route.realModel;
+        // Record the resolved upstream model — null when the route maps
+        // the alias to itself (no redirect), so the dashboard can
+        // distinguish "Haiku 4.5 served by Haiku 4.5" from "haiku alias
+        // redirected to MiniMax-M3".
+        realModel = route.realModel === originalModel ? null : route.realModel;
         body.model = route.realModel;
         applyToolCompat(body, route.upstream);
         applyThinkingCompat(body, route.upstream);
@@ -408,12 +414,13 @@ export function handleRequest(req, res) {
       } else if (!isOpenAiIngress) {
         // Unmapped model → ride the default upstream untouched. For a Claude
         // subscription this forwards your own credential straight to Anthropic.
+        // No route matched, so no redirect occurred; real_model is null.
         try {
           conn = upstreamConn(DEFAULT_UPSTREAM);
         } catch (err) {
           return fail(res, 500, `router: ${err.message}`);
         }
-        realModel = originalModel;
+        realModel = null;
         outBody = raw;
       }
     } else {
