@@ -63,6 +63,12 @@ npm run stats -- --watch   # full-screen repaint every 5s
   `.other.jsonl`): events with no string `model` (model-list polls, update checks,
   bodyless requests). The batcher never reads it, so it grows until you clear it;
   each record carries `method`, `requestPath`, and `userAgent`.
+  The batcher also appends lines it cannot ingest here, with a `rejectReason`.
+  It rejects only record-attributable failures (unparseable JSON, no string
+  `model`, a value SQLite cannot bind, NOT NULL, CHECK). Database faults (locked,
+  read-only, I/O, full, schema mismatch) abort the pass instead, keeping the
+  events file so the next tick retries automatically. If 5+ lines reach the
+  database and all fail with data errors, the pass aborts too (circuit breaker).
 - `STATS_DB_PATH` (default `~/.local/state/claude-mixed-models/router.stats.db`):
   persistent SQLite database (WAL mode). Don't delete this — it's the source of
   truth. The dashboard and CLI open it read-only.
@@ -82,3 +88,16 @@ it's supervised by the same `stats` agent.
 
 Node 22.5+ (for the built-in `node:sqlite` module). No third-party dependencies;
 `chart.js` is vendored at `stats/public/chart.min.js`.
+
+## Replaying rejected events
+
+After fixing whatever made records fail, move them back for another attempt:
+
+```
+docker exec claude-mixed-models_router_1 node bin/stats-replay-rejected.mjs --match 'NOT NULL' --dry-run
+docker exec claude-mixed-models_router_1 node bin/stats-replay-rejected.mjs --match 'NOT NULL'
+```
+
+`--match` is a regex against `rejectReason`; `--all` replays every rejected
+record. Router-written records (no `rejectReason`) are never replayed. Replaying
+twice is safe: the batcher dedupes on `(id, ts)`.
