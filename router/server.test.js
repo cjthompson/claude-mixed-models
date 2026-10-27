@@ -1250,3 +1250,36 @@ test('handleRequest: writes a JSONL event line on successful completion', async 
   assert.equal(rec.status, 200);
   assert.equal(rec.sessionId, null);
 });
+
+test('forward: a request without a model is logged to the other-events file, not the batcher file', async () => {
+  const conn = { url: new URL(`https://127.0.0.1:${upstream.port}`), key: null, auth: 'passthrough' };
+  upstream.respond = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"models":[]}');
+  };
+
+  const { req, res } = makeReqResForForward();
+  forward(req, res, conn, Buffer.alloc(0), {
+    id: 'nomodel-test',
+    t0: Date.now() - 5,
+    session: null,
+    model: null,
+    realModel: null,
+  });
+  await new Promise((resolve, reject) => {
+    res.on('finish', resolve);
+    res.on('error', reject);
+    setTimeout(() => reject(new Error('forward timed out after 5s')), 5000);
+  });
+
+  const mainPath = process.env.STATS_EVENTS_FILE;
+  assert.ok(!existsSync(mainPath), 'model-less events must not reach the batcher file');
+  const otherPath = join(statsDir, 'events.other.jsonl');
+  assert.ok(existsSync(otherPath), 'expected the other-events file');
+  const rec = JSON.parse(readFileSync(otherPath, 'utf8').trim().split('\n').pop());
+  assert.equal(rec.id, 'nomodel-test');
+  assert.equal(rec.model, null);
+  assert.equal(rec.status, 200);
+  assert.equal(typeof rec.method, 'string');
+  assert.match(rec.requestPath, /^\/v1\/messages-\d+$/);
+});

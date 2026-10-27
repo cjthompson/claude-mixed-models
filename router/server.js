@@ -193,6 +193,13 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       id,
       model: fields.model,
       real_model: fields.real_model,
+      // Non-chat requests land in the other-events log (see lib/event.js); keep
+      // enough request shape there to tell what they are. Chat events skip this.
+      ...(typeof fields.model === 'string' ? {} : {
+        method: req.method,
+        requestPath: req.url,
+        userAgent: req.headers['user-agent'],
+      }),
       effort,
       upstream: fields.upstream,
       status: fields.status,
@@ -447,6 +454,22 @@ export function handleRequest(req, res) {
       session,
     });
 
+    if (typeof originalModel !== 'string') {
+      // Diagnostic: every model-bearing request should carry a string model. Log
+      // the request shape (never headers' values beyond UA/content-type, never
+      // message content) to identify the caller of bodyless or model-less requests.
+      logger.warn('[router] request without string model', {
+        id,
+        method: req.method,
+        path: req.url,
+        userAgent: req.headers['user-agent'],
+        contentType: req.headers['content-type'],
+        upstream: conn.url.host,
+        bodyBytes: raw.length,
+        bodyKeys: parsedBody ? Object.keys(parsedBody) : null,
+      });
+    }
+
     forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel, reqBody: parsedBody, upstreamRequestPath });
   });
 }
@@ -551,6 +574,7 @@ if (isEntry) {
     logger.info(`Router on http://localhost:${PORT}`);
     logger.info(`Mapped routes: ${Object.keys(config.routes).join(', ') || '(none)'}`);
     logger.info(`Everything else → ${DEFAULT_UPSTREAM} upstream (passthrough)`);
+    logger.info(`Logging level: ${logger.config()}`);
     // Yellow banner confirms colorized log code is loaded. If you don't see
     // this in yellow, you're running the wrong code (or a version without
     // color support).

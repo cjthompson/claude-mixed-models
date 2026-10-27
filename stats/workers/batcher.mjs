@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, mkdirSync, writeFileSync, watch } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, appendFileSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
+import { otherEventsPath } from '../../lib/event.js';
 import { logger } from '../../lib/logger.js';
 
 const JSONL_PATH = process.env.STATS_EVENTS_FILE ?? '/tmp/claude-mixed-models/router.events.jsonl';
@@ -221,7 +222,28 @@ function recomputeRollup(db, grain, bucketStartIso, model, realModel, upstream) 
 }
 
 // One pass: read all lines, insert events, recompute touched rollup buckets, truncate.
-export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schemaPath = SCHEMA_PATH } = {}) {
+// SQLite result codes that mean "this record is bad" rather than "the database
+// is unwell": 1299 = NOT NULL, 275 = CHECK. A bind TypeError is likewise about
+// the value. Anything else (busy 5, locked 6, readonly 8, I/O 10, full 13,
+// schema mismatch 1, trigger aborts, ...) must not divert good data: it aborts
+// the pass so the file is kept and the next tick retries automatically.
+const DATA_ERRCODES = new Set([1299, 275]);
+export function isDataError(err) {
+  if (!err) return false;
+  if (err.code === 'ERR_INVALID_ARG_TYPE') return true;
+  return err.code === 'ERR_SQLITE_ERROR' && DATA_ERRCODES.has(err.errcode);
+}
+
+// If at least this many lines reached the database and ALL failed with data
+// errors, the cause is more likely systemic (e.g. code/schema mismatch) than
+// bad records, so abort instead of diverting a whole batch.
+const BREAKER_THRESHOLD = 5;
+
+// Lines that cannot become a row (unparseable, no string `model`, or an insert
+// that throws) are moved to `rejectedPath` with a `rejectReason` instead of
+// failing the pass: the file is only truncated after a commit, so one bad line
+// would otherwise be retried forever and block every event behind it.
+export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schemaPath = SCHEMA_PATH, rejectedPath = otherEventsPath(jsonlPath), breakerThreshold = BREAKER_THRESHOLD } = {}) {
   // Read lines first, before opening the DB — if reading fails, the JSONL is unchanged.
   let lines;
   try {
@@ -233,7 +255,7 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
       // (or absent) JSONL doesn't mean "no work to do" — schema/migration
       // runs are part of opening the DB.
       openAndMigrateDb(dbPath, schemaPath).close();
-      return { inserted: 0, truncated: false };
+      return { inserted: 0, rejected: 0, truncated: false };
     }
     throw err;
   }
@@ -242,37 +264,62 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
     // might still need a schema migration. Run the open+migrate step
     // even with no events to ingest.
     openAndMigrateDb(dbPath, schemaPath).close();
-    return { inserted: 0, truncated: false };
+    return { inserted: 0, rejected: 0, truncated: false };
   }
 
   const db = openAndMigrateDb(dbPath, schemaPath);
 
+  // ON CONFLICT .. DO NOTHING (not OR IGNORE): only a duplicate (id, ts) from a
+  // retried line is skipped silently. OR IGNORE would also swallow NOT NULL and
+  // CHECK violations, dropping bad rows with no error and no reject record.
   const insertEvent = db.prepare(`
-    INSERT OR IGNORE INTO events (id, ts, model, real_model, effort, upstream, status, duration_ms, session_id,
+    INSERT INTO events (id, ts, model, real_model, effort, upstream, status, duration_ms, session_id,
                                   input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
                                   cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (id, ts) DO NOTHING
   `);
 
   const touched = new Set();   // `${grain}|${bucketStart}|${model}|${realModel}|${upstream}`
   let inserted = 0;
+  let attempted = 0;      // lines that reached the database
+  let dbRejected = 0;     // of those, how many failed with a data error
+  const rejected = [];
   db.exec('BEGIN');
   try {
     for (const line of lines) {
       let rec;
-      try { rec = JSON.parse(line); } catch { continue; }
+      try { rec = JSON.parse(line); } catch {
+        rejected.push({ rawLine: line, rejectReason: 'unparseable JSON' });
+        continue;
+      }
+      if (rec === null || typeof rec !== 'object' || typeof rec.model !== 'string' || rec.model === '') {
+        rejected.push({ ...(rec !== null && typeof rec === 'object' ? rec : { rawLine: line }), rejectReason: 'missing or non-string model' });
+        continue;
+      }
       // The router writes 'cache_read_input_tokens' / 'cache_creation_input_tokens' / 'sessionId';
       // normalize to the column names used in the schema. `rec.real_model`
       // is null when no redirect happened; node:sqlite rejects `undefined`
       // for bound parameters, so coerce a missing key to null too.
       const realModel = rec.real_model === undefined ? null : (rec.real_model ?? null);
-      const result = insertEvent.run(
-        rec.id, rec.ts, rec.model, realModel, rec.effort ?? null, rec.upstream, rec.status, rec.durationMs,
-        rec.sessionId ?? null,
-        rec.input_tokens ?? 0, rec.output_tokens ?? 0,
-        rec.cache_read_input_tokens ?? 0, rec.cache_creation_input_tokens ?? 0,
-        rec.cache_5m_input_tokens ?? 0, rec.cache_1h_input_tokens ?? 0, rec.thinking_tokens ?? 0,
-      );
+      let result;
+      attempted++;
+      try {
+        result = insertEvent.run(
+          rec.id, rec.ts, rec.model, realModel, rec.effort ?? null, rec.upstream, rec.status, rec.durationMs,
+          rec.sessionId ?? null,
+          rec.input_tokens ?? 0, rec.output_tokens ?? 0,
+          rec.cache_read_input_tokens ?? 0, rec.cache_creation_input_tokens ?? 0,
+          rec.cache_5m_input_tokens ?? 0, rec.cache_1h_input_tokens ?? 0, rec.thinking_tokens ?? 0,
+        );
+      } catch (err) {
+        // A failed statement leaves the surrounding transaction intact, so a
+        // bad record can be skipped. Non-data errors propagate (rollback + retry).
+        if (!isDataError(err)) throw err;
+        dbRejected++;
+        rejected.push({ ...rec, rejectReason: err.message });
+        continue;
+      }
       if (result.changes > 0) {
         inserted++;
         // Sentinel '' represents null real_model in the rollup PK; events
@@ -286,6 +333,9 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
         }
       }
     }
+    if (attempted >= breakerThreshold && dbRejected === attempted) {
+      throw new Error(`circuit breaker: all ${attempted} lines that reached the database failed with data errors (last: ${rejected.at(-1)?.rejectReason}); keeping the file instead of diverting it`);
+    }
     for (const key of touched) {
       const [grain, bs, model, rollupRealModel, upstream] = key.split('|');
       recomputeRollup(db, grain, bs, model, rollupRealModel, upstream);
@@ -298,10 +348,18 @@ export async function runOnce({ jsonlPath = JSONL_PATH, dbPath = DB_PATH, schema
   }
   db.close();
 
+  // Persist rejects before truncating: if this throws, the main file is kept
+  // and the next pass retries (inserts are idempotent), so nothing is lost.
+  if (rejected.length > 0) {
+    mkdirSync(dirname(rejectedPath), { recursive: true });
+    appendFileSync(rejectedPath, rejected.map((r) => JSON.stringify(r) + '\n').join(''));
+    logger.warn(`[stats-batcher] moved ${rejected.length} rejected event(s) to ${rejectedPath}`);
+  }
+
   // Truncate only after a successful commit. If truncate fails, the next pass will
-  // re-process — INSERT OR IGNORE plus recompute-from-events makes that safe.
+  // re-process — ON CONFLICT DO NOTHING plus recompute-from-events makes that safe.
   writeFileSync(jsonlPath, '');
-  return { inserted, truncated: true };
+  return { inserted, rejected: rejected.length, truncated: true };
 }
 
 const FULL_REFRESH_MS = { '5m': 5 * 60_000, '1h': 60 * 60_000, '1d': 24 * 60 * 60_000 };

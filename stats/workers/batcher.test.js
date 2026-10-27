@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // We import the batcher's runOnce() so we can drive a single pass without spawning a process.
-import { runOnce, installShutdown } from './batcher.mjs';
+import { runOnce, installShutdown, isDataError } from './batcher.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = join(here, '..', 'schema.sql');
@@ -103,6 +103,197 @@ test('runOnce: skips malformed lines and continues', async () => {
     assert.equal(events.length, 1);
     assert.equal(events[0].id, 'good');
     db.close();
+  } finally {
+    cleanup();
+  }
+});
+
+const goodEvent = (id, extra = {}) => JSON.stringify({ id, ts: '2026-06-08T10:00:00.000Z', model: 'minimax', real_model: 'MiniMax-M3', upstream: 'api.minimax.io', status: 200, durationMs: 1000, sessionId: 's1', input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, ...extra });
+const readJsonl = (path) => readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+test('runOnce: model-less events are moved to the rejected file, not allowed to block the batch', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    fs.writeFileSync(jsonlPath, [
+      JSON.stringify({ id: 'nomodel', ts: '2026-06-08T10:00:00.000Z', real_model: null, upstream: 'api.anthropic.com', status: 401, durationMs: 73 }),
+      goodEvent('good1'),
+      JSON.stringify({ id: 'nullmod', model: null, ts: '2026-06-08T10:00:01.000Z', upstream: 'chatgpt.com', status: 200, durationMs: 400 }),
+      goodEvent('good2', { ts: '2026-06-08T10:01:00.000Z' }),
+    ].join('\n') + '\n');
+
+    const result = await runOnce({ jsonlPath, dbPath, rejectedPath });
+
+    assert.equal(result.inserted, 2);
+    assert.equal(result.rejected, 2);
+    const db = new DatabaseSync(dbPath);
+    assert.deepEqual(db.prepare('SELECT id FROM events ORDER BY id').all().map((r) => r.id), ['good1', 'good2']);
+    db.close();
+    assert.equal(readFileSync(jsonlPath, 'utf8'), '', 'main file is truncated');
+    const rejected = readJsonl(rejectedPath);
+    assert.deepEqual(rejected.map((r) => r.id), ['nomodel', 'nullmod']);
+    assert.match(rejected[0].rejectReason, /model/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: unparseable lines are preserved in the rejected file as rawLine', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    fs.writeFileSync(jsonlPath, ['not json at all', goodEvent('good')].join('\n') + '\n');
+    const result = await runOnce({ jsonlPath, dbPath, rejectedPath });
+    assert.equal(result.inserted, 1);
+    assert.equal(result.rejected, 1);
+    const [rec] = readJsonl(rejectedPath);
+    assert.equal(rec.rawLine, 'not json at all');
+    assert.match(rec.rejectReason, /JSON/i);
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: an event whose insert throws for another reason is rejected, not fatal', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    // status omitted -> undefined bind -> node:sqlite throws.
+    const noStatus = JSON.parse(goodEvent('nostatus'));
+    delete noStatus.status;
+    fs.writeFileSync(jsonlPath, [JSON.stringify(noStatus), goodEvent('good')].join('\n') + '\n');
+    const result = await runOnce({ jsonlPath, dbPath, rejectedPath });
+    assert.equal(result.inserted, 1);
+    assert.equal(result.rejected, 1);
+    const [rec] = readJsonl(rejectedPath);
+    assert.equal(rec.id, 'nostatus');
+    assert.match(rec.rejectReason, /bound|status/i);
+    assert.equal(readFileSync(jsonlPath, 'utf8'), '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: no rejected file is created when every line is valid', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    fs.writeFileSync(jsonlPath, goodEvent('good') + '\n');
+    const result = await runOnce({ jsonlPath, dbPath, rejectedPath });
+    assert.equal(result.rejected, 0);
+    assert.ok(!fs.existsSync(rejectedPath));
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: if the rejected file cannot be written, the main file is kept for retry', async () => {
+  const { jsonlPath, dbPath, cleanup } = freshPaths();
+  try {
+    const content = [JSON.stringify({ id: 'nomodel', ts: '2026-06-08T10:00:00.000Z', upstream: 'x', status: 200, durationMs: 1 }), goodEvent('good')].join('\n') + '\n';
+    fs.writeFileSync(jsonlPath, content);
+    await assert.rejects(runOnce({ jsonlPath, dbPath, rejectedPath: '/dev/null/nope/other.jsonl' }));
+    assert.equal(readFileSync(jsonlPath, 'utf8'), content, 'nothing is lost when the reject sink fails');
+  } finally {
+    cleanup();
+  }
+});
+
+test('isDataError: only record-attributable failures count as data errors', () => {
+  const sqlite = (errcode) => Object.assign(new Error('x'), { code: 'ERR_SQLITE_ERROR', errcode });
+  const bind = Object.assign(new TypeError('Provided value cannot be bound to SQLite parameter 3.'), { code: 'ERR_INVALID_ARG_TYPE' });
+  assert.equal(isDataError(bind), true, 'bind TypeError');
+  assert.equal(isDataError(sqlite(1299)), true, 'NOT NULL');
+  assert.equal(isDataError(sqlite(275)), true, 'CHECK');
+  for (const [name, code] of [['generic SQL error (schema mismatch)', 1], ['busy', 5], ['locked', 6], ['readonly', 8], ['I/O error', 10], ['disk full', 13], ['cannot open', 14], ['trigger abort', 1811]]) {
+    assert.equal(isDataError(sqlite(code)), false, name);
+  }
+  assert.equal(isDataError(new Error('plain')), false);
+  assert.equal(isDataError(null), false);
+});
+
+test('runOnce: a NOT NULL violation on another column is a data error and is rejected', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    fs.writeFileSync(jsonlPath, [goodEvent('nullts', { ts: null }), goodEvent('good')].join('\n') + '\n');
+    const result = await runOnce({ jsonlPath, dbPath, rejectedPath });
+    assert.equal(result.inserted, 1);
+    assert.equal(result.rejected, 1);
+    assert.match(readJsonl(rejectedPath)[0].rejectReason, /NOT NULL/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: a non-data insert failure aborts the pass and keeps the file for automatic retry', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    await runOnce({ jsonlPath, dbPath, rejectedPath });   // create + migrate the DB
+    const db = new DatabaseSync(dbPath);
+    // RAISE(ABORT) surfaces as errcode 1811 (constraint trigger): a stand-in for any non-data fault.
+    db.exec(`CREATE TRIGGER boom BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'simulated infra fault'); END`);
+    db.close();
+
+    const content = [goodEvent('a'), goodEvent('b', { ts: '2026-06-08T10:01:00.000Z' })].join('\n') + '\n';
+    fs.writeFileSync(jsonlPath, content);
+    await assert.rejects(runOnce({ jsonlPath, dbPath, rejectedPath }), /simulated infra fault/);
+
+    assert.equal(readFileSync(jsonlPath, 'utf8'), content, 'file kept so the next pass retries');
+    assert.ok(!fs.existsSync(rejectedPath), 'good data must not be diverted');
+
+    const check = new DatabaseSync(dbPath);
+    check.exec('DROP TRIGGER boom');
+    check.close();
+    const result = await runOnce({ jsonlPath, dbPath, rejectedPath });   // fault cleared -> automatic recovery
+    assert.equal(result.inserted, 2);
+    assert.equal(result.rejected, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: circuit breaker - every line that reaches the DB failing aborts instead of diverting', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    const bad = Array.from({ length: 5 }, (_, i) => goodEvent(`bad${i}`, { ts: null }));
+    const content = bad.join('\n') + '\n';
+    fs.writeFileSync(jsonlPath, content);
+    await assert.rejects(runOnce({ jsonlPath, dbPath, rejectedPath }), /circuit breaker/i);
+    assert.equal(readFileSync(jsonlPath, 'utf8'), content);
+    assert.ok(!fs.existsSync(rejectedPath));
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: circuit breaker does not trip when some lines insert, or below the threshold', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    const bad = (n) => Array.from({ length: n }, (_, i) => goodEvent(`bad${i}`, { ts: null }));
+    fs.writeFileSync(jsonlPath, [...bad(5), goodEvent('good')].join('\n') + '\n');
+    const mixed = await runOnce({ jsonlPath, dbPath, rejectedPath });
+    assert.deepEqual([mixed.inserted, mixed.rejected], [1, 5]);
+
+    fs.writeFileSync(jsonlPath, bad(4).join('\n') + '\n');
+    const few = await runOnce({ jsonlPath, dbPath, rejectedPath });
+    assert.deepEqual([few.inserted, few.rejected], [0, 4]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('runOnce: circuit breaker ignores model-less lines, which are known non-chat traffic', async () => {
+  const { dir, jsonlPath, dbPath, cleanup } = freshPaths();
+  const rejectedPath = join(dir, 'events.other.jsonl');
+  try {
+    const modelless = Array.from({ length: 8 }, (_, i) => JSON.stringify({ id: `m${i}`, ts: '2026-06-08T10:00:00.000Z', upstream: 'chatgpt.com', status: 200, durationMs: 1 }));
+    fs.writeFileSync(jsonlPath, modelless.join('\n') + '\n');
+    const result = await runOnce({ jsonlPath, dbPath, rejectedPath });
+    assert.deepEqual([result.inserted, result.rejected], [0, 8]);
   } finally {
     cleanup();
   }
@@ -231,10 +422,16 @@ test('runOnce: applyMigrations drops NOT NULL on events.real_model so no-redirec
     seed.exec(readFileSync(SCHEMA_PATH, 'utf8'));
     // Recreate events with real_model TEXT NOT NULL (the pre-fix schema).
     seed.exec(`
-      CREATE TABLE events_v0 AS SELECT id, ts, model, real_model, upstream, status, duration_ms, session_id,
-                                       input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-                                       cache_5m_input_tokens, cache_1h_input_tokens, thinking_tokens, effort
-                                FROM events WHERE 0;
+      CREATE TABLE events_v0 (
+        id TEXT NOT NULL, ts TEXT NOT NULL, model TEXT NOT NULL,
+        real_model TEXT NOT NULL,
+        upstream TEXT NOT NULL, status INTEGER NOT NULL, duration_ms INTEGER NOT NULL, session_id TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_5m_input_tokens INTEGER NOT NULL DEFAULT 0, cache_1h_input_tokens INTEGER NOT NULL DEFAULT 0,
+        thinking_tokens INTEGER NOT NULL DEFAULT 0, effort TEXT,
+        PRIMARY KEY (id, ts)
+      );
       DROP TABLE events;
       ALTER TABLE events_v0 RENAME TO events;
     `);

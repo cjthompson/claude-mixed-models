@@ -59,6 +59,10 @@ npm run stats -- --watch   # full-screen repaint every 5s
 - `STATS_EVENTS_FILE` (default `/tmp/claude-mixed-models/router.events.jsonl`):
   transient write buffer; truncated by the batcher after each pass. Safe to delete
   while the router is running — the next batcher pass will just find nothing.
+- `STATS_OTHER_EVENTS_FILE` (default: `STATS_EVENTS_FILE` with `.jsonl` replaced by
+  `.other.jsonl`): events with no string `model` (model-list polls, update checks,
+  bodyless requests). The batcher never reads it, so it grows until you clear it;
+  each record carries `method`, `requestPath`, and `userAgent`.
 - `STATS_DB_PATH` (default `~/.local/state/claude-mixed-models/router.stats.db`):
   persistent SQLite database (WAL mode). Don't delete this — it's the source of
   truth. The dashboard and CLI open it read-only.
