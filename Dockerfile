@@ -1,5 +1,6 @@
 FROM node:26-alpine
 WORKDIR /app
+COPY .env ./.env
 COPY router/ ./router/
 COPY proxy/ ./proxy/
 COPY bin/ ./bin/

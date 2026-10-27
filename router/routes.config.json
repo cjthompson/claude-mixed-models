@@ -5,7 +5,6 @@
     "openai-subscription": { "baseUrlEnv": "OPENAI_SUBSCRIPTION_BASE_URL", "defaultBaseUrl": "https://chatgpt.com/backend-api/codex", "auth": "passthrough" }
   },
   "routes": {
-    "claude-haiku-4-5-20251001": { "upstream": "minimax", "realModel": "MiniMax-M3" },
     "minimax": { "upstream": "minimax", "realModel": "MiniMax-M3" },
     "minimax-m2.7": { "upstream": "minimax", "realModel": "MiniMax-M2.7" }
   }
