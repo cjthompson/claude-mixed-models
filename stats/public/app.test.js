@@ -153,6 +153,61 @@ test('renders redirect arrow when alias and real_model canonicalize differently'
   assert.match(modelRows.innerHTML, />Opus 5.5</);
 });
 
+// Tokens-by-model-effort rows sort by model (known models by family, then
+// tier, then name; unknown models last), then by effort low → max with
+// unknown efforts last. Token counts are deliberately inverted so a
+// token-descending sort would fail.
+test('sorts tokens-by-model-effort rows by model then effort', async () => {
+  const { context } = appHarness();
+  const effortBody = element();
+  const rows = [
+    { model: 'mystery-model', effort: 'max', requests: 1, tokens: 100 },
+    { model: 'claude-opus-5-5', effort: 'max', requests: 1, tokens: 900000 },
+    { model: 'claude-haiku-5-5', effort: 'xhigh', requests: 1, tokens: 10 },
+    { model: 'claude-sonnet-5-5', effort: 'high', requests: 1, tokens: 300 },
+    { model: 'mystery-model', effort: 'weird', requests: 1, tokens: 600000 },
+    { model: 'claude-opus-5-5', effort: 'unspecified', requests: 1, tokens: 700000 },
+    { model: 'claude-haiku-5-5', effort: 'medium', requests: 1, tokens: 20 },
+    { model: 'claude-sonnet-5-5', effort: 'max', requests: 1, tokens: 200000 },
+    { model: 'claude-opus-5-5', effort: 'high', requests: 1, tokens: 400 },
+    { model: 'mystery-model', effort: '', requests: 1, tokens: 800000 },
+    { model: 'claude-haiku-5-5', effort: 'max', requests: 1, tokens: 4 },
+    { model: 'claude-sonnet-5-5', effort: 'low', requests: 1, tokens: 2 },
+    { model: 'claude-opus-5-5', effort: 'medium', requests: 1, tokens: 3 },
+    { model: 'claude-haiku-5-5', effort: 'low', requests: 1, tokens: 1 },
+    { model: 'claude-sonnet-5-5', effort: 'xhigh', requests: 1, tokens: 5 },
+    { model: 'claude-opus-5-5', effort: 'xhigh', requests: 1, tokens: 6 },
+    { model: 'claude-sonnet-5-5', effort: 'medium', requests: 1, tokens: 7 },
+    { model: 'claude-opus-5-5', effort: 'low', requests: 1, tokens: 8 },
+    { model: 'claude-haiku-5-5', effort: 'high', requests: 1, tokens: 9 },
+  ];
+  const baseFetch = context.fetch;
+  context.fetch = async (...args) => {
+    const res = await baseFetch(...args);
+    const base = await res.json();
+    return { ...res, json: async () => ({ ...base, tokensByModelEffort: rows }) };
+  };
+  const querySelector = context.document.querySelector;
+  context.document.querySelector = (selector) =>
+    selector === '#table-model-effort tbody' ? effortBody : querySelector(selector);
+
+  vm.runInNewContext(appSource, context, { filename: 'stats/public/app.js' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const rendered = [...effortBody.innerHTML.matchAll(/<td><span[^>]*><\/span>([^<]*)<\/td>\s*<td>([^<]*)<\/td>/g)]
+    .map((m) => [m[1], m[2]]);
+  const claudeEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
+  const expected = [
+    ...['Haiku 5.5', 'Sonnet 5.5'].flatMap((model) => claudeEfforts.map((effort) => [model, effort])),
+    ...claudeEfforts.map((effort) => ['Opus 5.5', effort]),
+    ['Opus 5.5', 'Unspecified'],
+    ['mystery-model', 'max'],
+    ['mystery-model', 'Unspecified'],
+    ['mystery-model', 'weird'],
+  ];
+  assert.deepEqual(rendered, expected);
+});
+
 // The summary row at the bottom of the top-models table aggregates
 // requests by canonical real_model so the user can see how much each
 // upstream model actually served, regardless of which alias the

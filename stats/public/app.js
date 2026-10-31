@@ -180,6 +180,29 @@ function totalsByRealModel(rows, numericKeys) {
   return order.map((k) => acc[k]).sort((a, b) => (b.requests ?? 0) - (a.requests ?? 0));
 }
 
+const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function effortRank(effort) {
+  const i = EFFORT_ORDER.indexOf(String(effort).toLowerCase());
+  return i === -1 ? EFFORT_ORDER.length : i;
+}
+
+// Same lookup colorForRow uses, so rows sort the way they are colored.
+function modelSortInfo(row) {
+  const key = row._real ?? row._alias;
+  return Object.hasOwn(MODEL_TIERS, key) ? MODEL_TIERS[key] : null;
+}
+
+function compareTokenRowsByModelEffort(a, b) {
+  const aInfo = modelSortInfo(a);
+  const bInfo = modelSortInfo(b);
+  if (!aInfo !== !bInfo) return aInfo ? -1 : 1;
+  const byModel = aInfo
+    ? aInfo.family.localeCompare(bInfo.family) || aInfo.tier - bInfo.tier || a.model.localeCompare(b.model)
+    : a.model.localeCompare(b.model);
+  return byModel || effortRank(a.effort) - effortRank(b.effort) || a.effort.localeCompare(b.effort);
+}
+
 function aggregateTokensByModelEffort(rows) {
   const grouped = new Map();
   for (const row of rows ?? []) {
@@ -196,9 +219,7 @@ function aggregateTokensByModelEffort(rows) {
     item.requests += Number(row.requests ?? 0);
     item.tokens += Number(row.tokens ?? 0);
   }
-  return [...grouped.values()].sort((a, b) =>
-    b.tokens - a.tokens || a.model.localeCompare(b.model) || a.effort.localeCompare(b.effort),
-  );
+  return [...grouped.values()].sort(compareTokenRowsByModelEffort);
 }
 
 function escapeHtml(value) {
