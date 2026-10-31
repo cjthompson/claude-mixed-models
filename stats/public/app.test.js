@@ -46,17 +46,17 @@ function appHarness() {
   const payload = {
     range: '7d',
     tokensByBucket: [
-      { bucket: '2026-09-12T00:00:00.000Z', model: 'claude-opus-5', tokens: 2 },
-      { bucket: '2026-09-12T00:00:00.000Z', model: 'claude-sonnet-5', tokens: 3 },
+      { bucket: '2026-09-12T00:00:00.000Z', model: 'claude-opus-5-5', tokens: 2 },
+      { bucket: '2026-09-12T00:00:00.000Z', model: 'claude-sonnet-5-5', tokens: 3 },
     ],
     requestsByHourOfDay: [],
     cacheHitRateByModel: [],
     topModels: [
-      row('claude-opus-5'),
-      row('claude-sonnet-5'),
-      row('gpt-5.6-luna'),
-      row('gpt-5.6-terra'),
-      row('gpt-5.6-sol'),
+      row('claude-opus-5-5'),
+      row('claude-sonnet-5-5'),
+      row('gpt-6.1-luna'),
+      row('gpt-6.1-terra'),
+      row('gpt-6.1-sol'),
       row('gpt-6-astra'),
     ],
     topSessions: [],
@@ -88,7 +88,7 @@ test('renders human-readable labels for the supported model aliases', async () =
   vm.runInNewContext(appSource, context, { filename: 'stats/public/app.js' });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  for (const label of ['Opus 5', 'Sonnet 5', 'GPT-5.6 Luna', 'GPT-5.6 Terra', 'GPT-5.6 Sol', 'GPT-6 Astra']) {
+  for (const label of ['Opus 5.5', 'Sonnet 5.5', 'GPT-6.1 Luna', 'GPT-6.1 Terra', 'GPT-6.1 Sol', 'GPT-6 Astra']) {
     assert.ok(modelRows.innerHTML.includes(`>${label}<`), `missing rendered label: ${label}`);
   }
 });
@@ -97,9 +97,9 @@ test('renders normalized token buckets for multiple models', async () => {
   const { context, charts } = appHarness();
   vm.runInNewContext(appSource, context, { filename: 'stats/public/app.js' });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const tokenChart = charts.find((chart) => chart.data.datasets.some((d) => d.label === 'Opus 5'));
+  const tokenChart = charts.find((chart) => chart.data.datasets.some((d) => d.label === 'Opus 5.5'));
   assert.ok(tokenChart);
-  assert.deepEqual([...tokenChart.data.datasets.map((d) => d.label)].sort(), ['Opus 5', 'Sonnet 5']);
+  assert.deepEqual([...tokenChart.data.datasets.map((d) => d.label)].sort(), ['Opus 5.5', 'Sonnet 5.5']);
   assert.deepEqual([...tokenChart.data.datasets.map((d) => d.data[0])], [2, 3]);
 });
 
@@ -150,7 +150,7 @@ test('renders redirect arrow when alias and real_model canonicalize differently'
   assert.match(modelRows.innerHTML, />MiniMax-M3</);
   assert.doesNotMatch(modelRows.innerHTML, />MiniMax-M3 \(→ /);
   // No redirect: alias canonicalizes to itself.
-  assert.match(modelRows.innerHTML, />Opus</);
+  assert.match(modelRows.innerHTML, />Opus 5.5</);
 });
 
 // The summary row at the bottom of the top-models table aggregates
@@ -180,13 +180,13 @@ test('renders totals per real_model summary aggregating across aliases', async (
         { model: 'minimax', real_model: 'MiniMax-M3', requests: 234,
           input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0,
           thinking: 0, errors: 0 },
-        { model: 'claude-opus', real_model: 'claude-opus', requests: 50,
+        { model: 'claude-opus-5-5', real_model: 'claude-opus-5-5', requests: 50,
           input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0,
           thinking: 0, errors: 0 },
       ],
       totalsByRealModel: [
         { real_model: 'MiniMax-M3', requests: 1234, input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0, thinking: 0, errors: 0 },
-        { real_model: 'claude-opus', requests: 50, input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0, thinking: 0, errors: 0 },
+        { real_model: 'claude-opus-5-5', requests: 50, input_tokens: 1, output_tokens: 1, cache_read: 0, cache_write: 0, thinking: 0, errors: 0 },
       ],
       topSessions: [],
       errorsByStatus: [],
@@ -200,5 +200,5 @@ test('renders totals per real_model summary aggregating across aliases', async (
   // MiniMax-M3 served 1000 (haiku) + 234 (minimax) = 1234, abbrev'd to 1.2k.
   assert.match(modelRows.innerHTML, /MiniMax-M3 1\.2k reqs/);
   // claude-opus's no-redirect bucket counts under "Opus" canonical name.
-  assert.match(modelRows.innerHTML, /Opus 50 reqs/);
+  assert.match(modelRows.innerHTML, /Opus 5.5 50 reqs/);
 });

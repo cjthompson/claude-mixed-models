@@ -13,22 +13,24 @@ const TIER_SATURATION = [45, 60, 78, 90];
 // tier 2 = Opus/Sol, tier 1 = Sonnet/Terra/MiniMax-M3, tier 0 = Haiku/Luna/M2.7.
 const MODEL_TIERS = {
   'Fable':         { family: 'claude',  tier: 3 },
+  'GPT-5.6 Luna':  { family: 'gpt',     tier: 0 },
+  'GPT-5.6 Sol':   { family: 'gpt',     tier: 2 },
+  'GPT-5.6 Terra': { family: 'gpt',     tier: 1 },
   'GPT-6 Astra':   { family: 'gpt',     tier: 3 },
-  'Opus':          { family: 'claude',  tier: 2 },
+  'GPT-6-Luna':    { family: 'gpt',     tier: 0 },
+  'GPT-6,1-Terra': { family: 'gpt',     tier: 1 },
+  'GPT-6-Sol':     { family: 'gpt',     tier: 2 },
+  'GPT-6.1-Sol':   { family: 'gpt',     tier: 2 },
+  'Haiku 4.5':     { family: 'claude',  tier: 0 },
+  'Haiku 5.5':     { family: 'claude',  tier: 0 },
+  'MiniMax M2.7':  { family: 'minimax', tier: 0 },
+  'MiniMax-M3':    { family: 'minimax', tier: 1 },
   'Opus 5':        { family: 'claude',  tier: 2 },
   'Opus 5.5':      { family: 'claude',  tier: 2 },
-  'GPT-6-Sol':     { family: 'gpt',     tier: 2 },
-  'GPT-5.6 Sol':   { family: 'gpt',     tier: 2 },
+  'Opus':          { family: 'claude',  tier: 2 },
   'Sonnet 4.6':    { family: 'claude',  tier: 1 },
   'Sonnet 5':      { family: 'claude',  tier: 1 },
   'Sonnet 5.5':    { family: 'claude',  tier: 1 },
-  'GPT-5.6 Terra': { family: 'gpt',     tier: 1 },
-  'MiniMax-M3':    { family: 'minimax', tier: 1 },
-  'Haiku 4.5':     { family: 'claude',  tier: 0 },
-  'Haiku 5.5':     { family: 'claude',  tier: 0 },
-  'GPT-6-Luna':    { family: 'gpt',     tier: 0 },
-  'GPT-5.6 Luna':  { family: 'gpt',     tier: 0 },
-  'MiniMax M2.7':  { family: 'minimax', tier: 0 },
 };
 
 function colorFor(model) {
@@ -76,25 +78,28 @@ const MODEL_ALIASES = {
   // Sonnet 4.6 variants
   'claude-sonnet-4-6':           'Sonnet 4.6',
   'claude-sonnet-4-6[1m]':       'Sonnet 4.6',
-  'sonnet[1m]':                  'Sonnet 4.6',
-  'sonnet':                      'Sonnet 4.6',
+  'claude-sonnet-5':             'Sonnet 5',
+  'claude-sonnet-5-5':           'Sonnet 5.5',
+  'sonnet[1m]':                  'Sonnet 5.5',
+  'sonnet':                      'Sonnet 5.5',
   // Haiku 4.5 variants
   'claude-haiku-4-5':            'Haiku 4.5',
   'claude-haiku-4-5-20251001':   'Haiku 4.5',
-  'haiku':                       'Haiku 4.5',
+  'claude-haiku-5-5':            'Haiku 5.5',
+  'haiku':                       'Haiku 5.5',
   // Opus variants
-  'claude-opus':                 'Opus',
-  'claude-opus-4-7':             'Opus',
-  'claude-opus-4-8':             'Opus',
+  'claude-opus':                 'Opus 5.5',
+  'claude-opus-4-7':             'Opus 4.7',
+  'claude-opus-4-8':             'Opus 4.8',
   'claude-opus-5':               'Opus 5',
   'claude-opus-5-5':             'Opus 5.5',
-  'opus':                        'Opus',
-  // Sonnet 5
-  'claude-sonnet-5':             'Sonnet 5',
-  'claude-sonnet-5-5':           'Sonnet 5.5',
+  'opus':                        'Opus 5,5',
   // GPT / Codex variants
-  'gpt-6-luna':                  'GPT-6-Luna',
-  'gpt-6-sol':                   'GPT-6-Sol',
+  'gpt-6-luna':                  'GPT-6 Luna',
+  'gpt-6-sol':                   'GPT-6 Sol',
+  'gpt-6.1-luna':                'GPT-6.1 Luna',
+  'gpt-6.1-terra':               'GPT-6.1 Terra',
+  'gpt-6.1-sol':                 'GPT-6.1 Sol',
   'gpt-5.6-luna':                'GPT-5.6 Luna',
   'gpt-5.6-terra':               'GPT-5.6 Terra',
   'gpt-5.6-sol':                 'GPT-5.6 Sol',
@@ -112,8 +117,6 @@ const MODEL_ALIASES = {
   // because the spelling differs in case or punctuation.
   'minimax-m2-7':                'MiniMax M2.7',
   'minimax-m3-20251001':         'MiniMax-M3',
-  // Haiku 5.5
-  'claude-haiku-5-5':            'Haiku 5.5',
 };
 
 function canonicalModel(name) {
@@ -438,4 +441,6 @@ if (savedRange && VALID_RANGES.includes(savedRange)) {
   document.getElementById('range').value = savedRange;
 }
 refresh();
+model = "gpt-6-luna"
+model_reasoning_effort = "xhigh"
 setInterval(refresh, 10_000);
