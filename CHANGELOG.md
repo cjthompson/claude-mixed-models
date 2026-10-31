@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-31
+
+### Tasks
+- Sort "Tokens by model and effort" web view by model, then effort (low→max) (#stats, #web)
+
 ## 2026-09-24
 
 ### lib/logger.js implementation plan (P002)
