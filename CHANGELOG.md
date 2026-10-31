@@ -4,6 +4,7 @@
 
 ### Tasks
 - Sort "Tokens by model and effort" web view by model, then effort (low→max) (#stats, #web)
+- Add missing tests for "Tokens by model and effort" table rendering (#stats, #web, #tests)
 
 ## 2026-09-24
 
