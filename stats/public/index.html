@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Usage stats</title>
   <link rel="stylesheet" href="style.css">
   <script src="chart.min.js"></script>
@@ -37,19 +38,27 @@
     </section>
     <section class="card">
       <h2>Top models</h2>
-      <table id="table-models"><thead><tr><th>Model</th><th>Reqs</th><th>Ctx</th><th>Out</th><th>Reasoning</th><th>Errors</th></tr></thead><tbody></tbody></table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Top models, scrollable">
+        <table id="table-models"><thead><tr><th>Model</th><th>Reqs</th><th>Ctx</th><th>Out</th><th>Reasoning</th><th>Errors</th></tr></thead><tbody></tbody></table>
+      </div>
     </section>
     <section class="card">
       <h2>Tokens by model and effort</h2>
-      <table id="table-model-effort"><thead><tr><th>Model</th><th>Effort</th><th>Reqs</th><th>Tokens</th></tr></thead><tbody></tbody></table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Tokens by model and effort, scrollable">
+        <table id="table-model-effort"><thead><tr><th>Model</th><th>Effort</th><th>Reqs</th><th>Tokens</th></tr></thead><tbody></tbody></table>
+      </div>
     </section>
     <section class="card">
       <h2>Top sessions</h2>
-      <table id="table-sessions"><thead><tr><th>Session</th><th>Reqs</th><th>Tokens</th></tr></thead><tbody></tbody></table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Top sessions, scrollable">
+        <table id="table-sessions"><thead><tr><th>Session</th><th>Reqs</th><th>Tokens</th></tr></thead><tbody></tbody></table>
+      </div>
     </section>
     <section class="card">
       <h2>Errors (last 24h)</h2>
-      <table id="table-errors"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody></tbody></table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Errors, scrollable">
+        <table id="table-errors"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody></tbody></table>
+      </div>
     </section>
   </main>
   <script src="viewer-clock.js"></script>

@@ -462,6 +462,4 @@ if (savedRange && VALID_RANGES.includes(savedRange)) {
   document.getElementById('range').value = savedRange;
 }
 refresh();
-model = "gpt-6-luna"
-model_reasoning_effort = "xhigh"
 setInterval(refresh, 10_000);
