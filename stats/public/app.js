@@ -446,7 +446,14 @@ function renderStackedBar(canvasId, labels, series, valueFor, labelFor = (s) => 
     type: 'bar',
     data: { labels, datasets },
     options: {
-      plugins: { legend: { display: true } },
+      // The wrapper in index.html sets the height, so let the canvas fill it.
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          display: true,
+          labels: { boxWidth: 8, boxHeight: 8, padding: 6, font: { size: 10 } },
+        },
+      },
       scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
     },
   });

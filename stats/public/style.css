@@ -29,6 +29,11 @@ main {
 }
 .card { min-width: 0; background: var(--card-bg); border-radius: 6px; padding: 0.9rem 1rem; }
 .card canvas { display: block; max-width: 100%; }
+/* Tokens chart: the wrapper sets the height; Chart.js fills it. 2.5 matches the other
+   charts' ratio on tablet and desktop. Phones override below. */
+.chart-box { position: relative; width: 100%; min-width: 0; }
+.chart-box--tokens { aspect-ratio: 2.5; }
+.chart-box--tokens canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .card h2 { margin: 0 0 0.8rem 0; font-size: 0.95rem; font-weight: 500; color: var(--muted); }
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -45,6 +50,9 @@ th { color: var(--muted); font-weight: 500; }
 @media (max-width: 767px) {
   #table-models th:nth-child(5), #table-models td:nth-child(5),
   #table-models th:nth-child(6), #table-models td:nth-child(6) { display: none; }
+  /* Tokens chart: twice the height of the other charts on phones. The 240px floor
+     keeps it at 2x at 320px, where the other charts stay at their 120px height. */
+  .chart-box--tokens { aspect-ratio: 1.25; min-height: 240px; }
 }
 
 /* Tablet and desktop: restore the two- and three-column layout. 768px fits two
