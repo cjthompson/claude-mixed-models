@@ -454,22 +454,6 @@ export function handleRequest(req, res) {
       session,
     });
 
-    if (typeof originalModel !== 'string') {
-      // Diagnostic: every model-bearing request should carry a string model. Log
-      // the request shape (never headers' values beyond UA/content-type, never
-      // message content) to identify the caller of bodyless or model-less requests.
-      logger.warn('[router] request without string model', {
-        id,
-        method: req.method,
-        path: req.url,
-        userAgent: req.headers['user-agent'],
-        contentType: req.headers['content-type'],
-        upstream: conn.url.host,
-        bodyBytes: raw.length,
-        bodyKeys: parsedBody ? Object.keys(parsedBody) : null,
-      });
-    }
-
     forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel, reqBody: parsedBody, upstreamRequestPath });
   });
 }
