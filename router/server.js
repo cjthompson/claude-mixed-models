@@ -163,7 +163,7 @@ function effortFromRequestBody(body) {
   return null;
 }
 
-export function forward(req, res, conn, outBody, { id, t0, session, model, realModel, reqBody, upstreamRequestPath = req.url }) {
+export function forward(req, res, conn, outBody, { id, t0, session, model, realModel, reqBody, upstreamRequestPath = req.url, isOpenAiIngress = false }) {
   const effort = effortFromRequestBody(reqBody);
   const headers = { ...req.headers };
   for (const h of HOP_BY_HOP) delete headers[h];
@@ -184,6 +184,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
   // `done` is shared by every exit path (upstream end, upstream error, client
   // close). Exactly one of them may call logRes + res.end for a given request.
   let done = false;
+  let completionScanner;
   const finalize = (fields) => {
     if (done) return;
     done = true;
@@ -227,7 +228,6 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       headers,
     },
     (upstreamRes) => {
-      // Track the upstream status so the client-disconnect path can log it.
       const upstreamStatus = upstreamRes.statusCode ?? 502;
       const safeHeaders = { ...upstreamRes.headers };
       for (const h of HOP_BY_HOP) delete safeHeaders[h];
@@ -241,6 +241,7 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       const scanner = new SseLineScanner();
       let chunkCount = 0;
       const isEventStream = (upstreamRes.headers['content-type'] ?? '').includes('event-stream');
+      if (isOpenAiIngress && isEventStream && upstreamStatus === 200) completionScanner = scanner;
       const jsonChunks = [];   // buffered only for non-SSE responses (small error/sync bodies)
       upstreamRes.on('data', (c) => {
         chunkCount++;
@@ -297,20 +298,21 @@ export function forward(req, res, conn, outBody, { id, t0, session, model, realM
       });
     }
   );
-  // If the client goes away mid-stream, kill the upstream so we don't keep
-  // paying for a response nobody is reading, and log a RES line for it.
+  // Codex can close the stream after receiving the terminal event and before
+  // upstream EOF. The scanner sees each frame before forwarding its bytes.
   res.on('close', () => {
     if (done) return;
-    upstreamReq.destroy();
+    const completed = completionScanner?.responseCompleted;
     finalize({
       upstream: conn.url.host,
-      status: 499,    // nginx convention for "client closed request"
+      status: completed ? 200 : 499,
       durationMs: Date.now() - t0,
-      usage: null,
+      usage: completed ? normalizeUsage(completionScanner.usage) : null,
       session,
       model,
       real_model: realModel,
     });
+    upstreamReq.destroy();
   });
   upstreamReq.on('error', (err) => {
     logger.error('[ROUTER UPSTREAM ERROR]', err.message);
@@ -454,7 +456,7 @@ export function handleRequest(req, res) {
       session,
     });
 
-    forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel, reqBody: parsedBody, upstreamRequestPath });
+    forward(req, res, conn, outBody, { id, t0, session, model: originalModel, realModel, reqBody: parsedBody, upstreamRequestPath, isOpenAiIngress });
   });
 }
 

@@ -664,6 +664,44 @@ test('handleRequest: /openai responses forwards response.completed usage from ch
   assert.match(stripped, /total: 38/);
 });
 
+test('handleRequest: Codex disconnect after response.completed retains status and usage', { timeout: 5000 }, async () => {
+  const previousBaseUrl = process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+  const terminalEvent = 'event: response.completed\r\ndata: {"type":"response.completed",\r\ndata: "response":{"usage":{"input_tokens":31,"output_tokens":7}}}\r\n\r\n';
+  upstream.respond = (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(terminalEvent.slice(0, 70));
+    res.write(terminalEvent.slice(70));
+    // Leave the upstream open until the router handles the disconnect.
+  };
+  const logs = captureLog();
+  try {
+    process.env.OPENAI_SUBSCRIPTION_BASE_URL = `https://127.0.0.1:${upstream.port}`;
+    const req = makePostReq({ model: 'gpt-5', input: 'hello' }, '/openai/backend-api/codex/responses');
+    const res = makeHandleResponse();
+    const write = res.write.bind(res);
+    let received = '';
+    res.write = (chunk) => {
+      received += chunk.toString('utf8');
+      const result = write(chunk);
+      if (received === terminalEvent) res.destroy();
+      return result;
+    };
+    const closed = new Promise((resolve) => res.once('close', resolve));
+    handleRequest(req, res);
+    await closed;
+  } finally {
+    logs.restore();
+    if (previousBaseUrl === undefined) delete process.env.OPENAI_SUBSCRIPTION_BASE_URL;
+    else process.env.OPENAI_SUBSCRIPTION_BASE_URL = previousBaseUrl;
+  }
+
+  const responses = logs.lines.filter((line) => / RES /.test(line));
+  assert.equal(responses.length, 1);
+  const response = responses[0].replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(response, /status=200/);
+  assert.match(response, /\[in: 31 \| out: 7/);
+});
+
 test('handleRequest: /openaiish remains on the default Anthropic route with its full path', async () => {
   const previousBaseUrl = process.env.ANTHROPIC_BASE_URL_UPSTREAM;
   let received;
