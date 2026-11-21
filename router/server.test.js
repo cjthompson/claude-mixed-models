@@ -695,7 +695,11 @@ test('handleRequest: Codex disconnect after response.completed retains status an
     else process.env.OPENAI_SUBSCRIPTION_BASE_URL = previousBaseUrl;
   }
 
-  const responses = logs.lines.filter((line) => / RES /.test(line));
+  const requestLine = logs.lines.find((line) => / REQ /.test(line) && /model=.*gpt-5/.test(line));
+  assert.ok(requestLine, `expected a REQ line for the Codex request, got: ${JSON.stringify(logs.lines)}`);
+  const requestId = requestLine.match(/ REQ ([^\]]+)\]/)?.[1];
+  assert.ok(requestId, `expected a request id in: ${requestLine}`);
+  const responses = logs.lines.filter((line) => line.includes(` RES ${requestId}]`));
   assert.equal(responses.length, 1);
   const response = responses[0].replace(/\x1b\[[0-9;]*m/g, '');
   assert.match(response, /status=200/);

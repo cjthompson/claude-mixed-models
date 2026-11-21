@@ -9,32 +9,72 @@ const SCHEME_HUES = {
 const TIER_LIGHTNESS  = [25, 40, 60, 80];
 const TIER_SATURATION = [45, 60, 78, 90];
 
-// Performance tier per canonical model. Tier 3 = brightest (Fable, Astra),
-// tier 2 = Opus/Sol, tier 1 = Sonnet/Terra/MiniMax-M3, tier 0 = Haiku/Luna/M2.7.
-const MODEL_TIERS = {
-  'Fable':         { family: 'claude',  tier: 3 },
-  'GPT-5.6 Luna':  { family: 'gpt',     tier: 0 },
-  'GPT-5.6 Sol':   { family: 'gpt',     tier: 2 },
-  'GPT-5.6 Terra': { family: 'gpt',     tier: 1 },
-  'GPT-6 Astra':   { family: 'gpt',     tier: 3 },
-  'GPT-6-Luna':    { family: 'gpt',     tier: 0 },
-  'GPT-6,1-Terra': { family: 'gpt',     tier: 1 },
-  'GPT-6-Sol':     { family: 'gpt',     tier: 2 },
-  'GPT-6.1-Sol':   { family: 'gpt',     tier: 2 },
-  'Haiku 4.5':     { family: 'claude',  tier: 0 },
-  'Haiku 5.5':     { family: 'claude',  tier: 0 },
-  'MiniMax M2.7':  { family: 'minimax', tier: 0 },
-  'MiniMax-M3':    { family: 'minimax', tier: 1 },
-  'Opus 5':        { family: 'claude',  tier: 2 },
-  'Opus 5.5':      { family: 'claude',  tier: 2 },
-  'Opus':          { family: 'claude',  tier: 2 },
-  'Sonnet 4.6':    { family: 'claude',  tier: 1 },
-  'Sonnet 5':      { family: 'claude',  tier: 1 },
-  'Sonnet 5.5':    { family: 'claude',  tier: 1 },
+// Model registry keyed by the raw, case-insensitive slug. Tier 3 = brightest
+// (Fable, Astra), tier 2 = Opus/Sol, tier 1 = Sonnet/Terra/MiniMax-M3, and
+// tier 0 = Haiku/Luna/M2.7. A null tier keeps a display alias without assigning
+// it a known-model color or sort position.
+const MODELS = {
+  'codex-auto-review':           { displayName: 'Auto Review', tier: null },
+  'fable':                       { displayName: 'Fable', tier: 3 },
+  'claude-fable':                { displayName: 'Fable', tier: 3 },
+  'claude-fable-5-2':            { displayName: 'Fable 5.2', tier: 3 },
+  'claude-sonnet-4-6':           { displayName: 'Sonnet 4.6', tier: 1 },
+  'claude-sonnet-4-6[1m]':       { displayName: 'Sonnet 4.6', tier: 1 },
+  'claude-sonnet-5':             { displayName: 'Sonnet 5', tier: 1 },
+  'claude-sonnet-5-5':           { displayName: 'Sonnet 5.5', tier: 1 },
+  'sonnet[1m]':                  { displayName: 'Sonnet 5.5', tier: 1 },
+  'sonnet':                      { displayName: 'Sonnet 5.5', tier: 1 },
+  'claude-haiku-4-5':            { displayName: 'Haiku 4.5', tier: 0 },
+  'claude-haiku-4-5-20251001':   { displayName: 'Haiku 4.5', tier: 0 },
+  'claude-haiku-5-5':            { displayName: 'Haiku 5.5', tier: 0 },
+  'haiku':                       { displayName: 'Haiku 5.5', tier: 0 },
+  'claude-opus':                 { displayName: 'Opus 5.5', tier: 2 },
+  'claude-opus-4-7':             { displayName: 'Opus 4.7', tier: null },
+  'claude-opus-4-8':             { displayName: 'Opus 4.8', tier: null },
+  'claude-opus-5':               { displayName: 'Opus 5', tier: 2 },
+  'claude-opus-5-5':             { displayName: 'Opus 5.5', tier: 2 },
+  'opus':                        { displayName: 'Opus 5,5', tier: null },
+  'gpt-6-luna':                  { displayName: 'GPT-6 Luna', tier: 0 },
+  'gpt-6-sol':                   { displayName: 'GPT-6 Sol', tier: 2 },
+  'gpt-6.1-luna':                { displayName: 'GPT-6.1 Luna', tier: 0 },
+  'gpt-6.1-terra':               { displayName: 'GPT-6.1 Terra', tier: 1 },
+  'gpt-6.1-sol':                 { displayName: 'GPT-6.1 Sol', tier: 2 },
+  'gpt-6.2-sol':                 { displayName: 'GPT-6.2 Sol', tier: 2 },
+  'gpt-5.6-luna':                { displayName: 'GPT-5.6 Luna', tier: 0 },
+  'gpt-5.6-terra':               { displayName: 'GPT-5.6 Terra', tier: 1 },
+  'gpt-5.6-sol':                 { displayName: 'GPT-5.6 Sol', tier: 2 },
+  'gpt-6-astra':                 { displayName: 'GPT-6 Astra', tier: 3 },
+  'gpt-6.2-astra':               { displayName: 'GPT-6.2 Astra', tier: 3 },
+  'minimax':                     { displayName: 'MiniMax-M3', tier: 1 },
+  'minimax[1m]':                 { displayName: 'MiniMax-M3', tier: 1 },
+  'minimax-m3':                  { displayName: 'MiniMax-M3', tier: 1 },
+  'minimax-m2.7':                { displayName: 'MiniMax M2.7', tier: 0 },
+  'minimax-m2-7':                { displayName: 'MiniMax M2.7', tier: 0 },
+  'minimax-m3-20251001':         { displayName: 'MiniMax-M3', tier: 1 },
 };
 
+function modelFamily(slug) {
+  if (slug.startsWith('gpt-')) return 'gpt';
+  if (slug.startsWith('minimax')) return 'minimax';
+  return 'claude';
+}
+
+function modelInfoFor(model) {
+  if (model == null) return null;
+  const normalized = String(model).toLowerCase();
+  const direct = MODELS[normalized];
+  if (direct) return direct.tier == null ? null : { ...direct, family: modelFamily(normalized) };
+
+  for (const [slug, info] of Object.entries(MODELS)) {
+    if (info.displayName === model && info.tier != null) {
+      return { ...info, family: modelFamily(slug) };
+    }
+  }
+  return null;
+}
+
 function colorFor(model) {
-  const info = MODEL_TIERS[model];
+  const info = modelInfoFor(model);
   if (!info) return sessionColor(model); // session IDs / unknown → hash palette
   const h = SCHEME_HUES[info.family][info.tier];
   return `hsl(${h} ${TIER_SATURATION[info.tier]}% ${TIER_LIGHTNESS[info.tier]}%)`;
@@ -70,59 +110,10 @@ function sessionColor(s) { return PALETTE[hashKey(s) % PALETTE.length]; }
 // those would canonicalize to different display names — and the
 // "Haiku 4.5 (→ MiniMax-M3)" row would gain a spurious arrow because
 // `'MiniMax-M3'` and `'MiniMax-M3'` (alias-side) didn't both hit the
-// same MODEL_ALIASES entry.
-const MODEL_ALIASES = {
-  // Fable (top tier)
-  'fable':                       'Fable',
-  'claude-fable':                'Fable',
-  // Sonnet 4.6 variants
-  'claude-sonnet-4-6':           'Sonnet 4.6',
-  'claude-sonnet-4-6[1m]':       'Sonnet 4.6',
-  'claude-sonnet-5':             'Sonnet 5',
-  'claude-sonnet-5-5':           'Sonnet 5.5',
-  'sonnet[1m]':                  'Sonnet 5.5',
-  'sonnet':                      'Sonnet 5.5',
-  // Haiku 4.5 variants
-  'claude-haiku-4-5':            'Haiku 4.5',
-  'claude-haiku-4-5-20251001':   'Haiku 4.5',
-  'claude-haiku-5-5':            'Haiku 5.5',
-  'haiku':                       'Haiku 5.5',
-  // Opus variants
-  'claude-opus':                 'Opus 5.5',
-  'claude-opus-4-7':             'Opus 4.7',
-  'claude-opus-4-8':             'Opus 4.8',
-  'claude-opus-5':               'Opus 5',
-  'claude-opus-5-5':             'Opus 5.5',
-  'opus':                        'Opus 5,5',
-  // GPT / Codex variants
-  'gpt-6-luna':                  'GPT-6 Luna',
-  'gpt-6-sol':                   'GPT-6 Sol',
-  'gpt-6.1-luna':                'GPT-6.1 Luna',
-  'gpt-6.1-terra':               'GPT-6.1 Terra',
-  'gpt-6.1-sol':                 'GPT-6.1 Sol',
-  'gpt-5.6-luna':                'GPT-5.6 Luna',
-  'gpt-5.6-terra':               'GPT-5.6 Terra',
-  'gpt-5.6-sol':                 'GPT-5.6 Sol',
-  'gpt-6-astra':                 'GPT-6 Astra',
-  // MiniMax variants — bare `minimax` is the current M3 build. Both
-  // the alias side (`minimax-m3`) and the router-captured real_model
-  // (`MiniMax-M3`) need to canonicalize identically.
-  'minimax':                     'MiniMax-M3',
-  'minimax[1m]':                 'MiniMax-M3',
-  'minimax-m3':                  'MiniMax-M3',
-  'minimax-m2.7':                'MiniMax M2.7',
-  // Upstream real-model spellings (the names the upstream returns to
-  // the router) — same canonical form as their alias-side counterparts
-  // so a redirected request doesn't render with a spurious arrow just
-  // because the spelling differs in case or punctuation.
-  'minimax-m2-7':                'MiniMax M2.7',
-  'minimax-m3-20251001':         'MiniMax-M3',
-};
-
+// same model-registry entry.
 function canonicalModel(name) {
   if (name == null || name === '') return null;
-  const aliased = MODEL_ALIASES[name.toLowerCase()];
-  return aliased ?? name;
+  return MODELS[name.toLowerCase()]?.displayName ?? name;
 }
 
 function aggregateByCanonical(rows, numericKeys) {
@@ -190,7 +181,7 @@ function effortRank(effort) {
 // Same lookup colorForRow uses, so rows sort the way they are colored.
 function modelSortInfo(row) {
   const key = row._real ?? row._alias;
-  return Object.hasOwn(MODEL_TIERS, key) ? MODEL_TIERS[key] : null;
+  return modelInfoFor(key);
 }
 
 function compareTokenRowsByModelEffort(a, b) {

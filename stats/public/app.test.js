@@ -306,7 +306,7 @@ test('sorts redirected tokens-by-model-effort rows by real model, not alias', as
   ]);
 });
 
-test('orders GPT and MiniMax families by MODEL_TIERS family then tier', async () => {
+test('orders GPT and MiniMax families by family then tier', async () => {
   const html = await renderModelEffort([
     { model: 'minimax-m3', effort: 'low', requests: 1, tokens: 1 },
     { model: 'gpt-6-astra', effort: 'low', requests: 1, tokens: 1 },
@@ -353,24 +353,41 @@ test('merges raw model strings that canonicalize to the same label', async () =>
   ]);
 });
 
-test('sorts unresolved GPT names after known ones with hash colors', async () => {
-  // MODEL_TIERS keys ('GPT-6-Sol', 'GPT-6,1-Terra', ...) don't match canonical GPT-6 names, so these render as unknown.
+test('sorts supported GPT model slugs by tier and leaves unsupported slugs unknown', async () => {
   const html = await renderModelEffort([
+    { model: 'gpt-6.2-sol', effort: 'low', requests: 1, tokens: 1 },
+    { model: 'gpt-6.2-astra', effort: 'low', requests: 1, tokens: 1 },
     { model: 'gpt-6.1-sol', effort: 'low', requests: 1, tokens: 1 },
     { model: 'gpt-6-luna', effort: 'low', requests: 1, tokens: 1 },
     { model: 'gpt-6.1-terra', effort: 'low', requests: 1, tokens: 1 },
     { model: 'gpt-6-sol', effort: 'low', requests: 1, tokens: 1 },
     { model: 'gpt-6.1-luna', effort: 'low', requests: 1, tokens: 1 },
     { model: 'gpt-5.6-sol', effort: 'low', requests: 1, tokens: 1 },
+    { model: 'gpt-7-unlisted', effort: 'low', requests: 1, tokens: 1 },
   ]);
   const rows = parseRows(html);
-  assert.equal(rows.length, 6);
-  assert.equal(rows[0].model, 'GPT-5.6 Sol');
-  assert.match(rows[0].color, /^hsl\(/);
-  const rest = rows.slice(1);
-  for (const row of rest) assert.match(row.color, /^#[0-9a-f]{6}$/);
-  const labels = rest.map((r) => r.model);
-  assert.deepEqual(labels, [...labels].sort((a, b) => a.localeCompare(b)));
+  assert.deepEqual(rows.map((row) => row.model), [
+    'GPT-6 Luna',
+    'GPT-6.1 Luna',
+    'GPT-6.1 Terra',
+    'GPT-5.6 Sol',
+    'GPT-6 Sol',
+    'GPT-6.1 Sol',
+    'GPT-6.2 Sol',
+    'GPT-6.2 Astra',
+    'gpt-7-unlisted',
+  ]);
+  assert.deepEqual(rows.slice(0, -1).map((row) => row.color), [
+    'hsl(224 45% 25%)',
+    'hsl(224 45% 25%)',
+    'hsl(220 60% 40%)',
+    'hsl(216 78% 60%)',
+    'hsl(216 78% 60%)',
+    'hsl(216 78% 60%)',
+    'hsl(216 78% 60%)',
+    'hsl(212 90% 80%)',
+  ]);
+  assert.match(rows.at(-1).color, /^#[0-9a-f]{6}$/);
 });
 
 // The summary row at the bottom of the top-models table aggregates
