@@ -29,6 +29,7 @@ const MIME = {
   '.js':   'application/javascript; charset=utf-8',
   '.css':  'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.ico':  'image/x-icon',
 };
 
 // Open a fresh read-only connection per request. Cheap with `node:sqlite` (no connection

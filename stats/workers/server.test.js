@@ -96,6 +96,28 @@ test('startServer: GET / serves the dashboard HTML', async () => {
   }
 });
 
+test('startServer: GET /favicon.ico serves an ICO file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'server-test-'));
+  const dbPath = join(dir, 'stats.db');
+  try {
+    seed(dbPath, false);
+    const port = 18789 + Math.floor(Math.random() * 1000);
+    const { url, close } = await startServer({ dbPath, port, publicDir });
+    try {
+      const res = await fetch(`${url}/favicon.ico`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'image/x-icon');
+      const bytes = Buffer.from(await res.arrayBuffer());
+      // ICO header: reserved 0, type 1 (icon), at least one image.
+      assert.deepEqual([...bytes.subarray(0, 4)], [0, 0, 1, 0]);
+    } finally {
+      await close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('startServer: read-only WAL connection sees writes from a separate writer', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'server-test-'));
   const dbPath = join(dir, 'stats.db');
